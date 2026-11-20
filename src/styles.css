@@ -278,6 +278,8 @@ textarea.t { font-family: var(--hand); font-size: 17px; min-height: 90px; resize
   color: var(--mut); font-family: var(--hand); font-size: 17px; }
 .errtape { background: var(--ember); color: #14080a; font-family: var(--mono); font-size: 12.5px;
   padding: 8px 12px; margin-top: 12px; transform: rotate(.6deg); display: inline-block; }
+.oktape { background: var(--acid); color: #14120d; font-family: var(--mono); font-size: 12.5px;
+  padding: 8px 12px; margin: 0 0 12px 2px; transform: rotate(-.6deg); display: inline-block; }
 @media (max-width: 380px) { .wheel { scale: .86; } }
 
 @media (max-width: 560px) {

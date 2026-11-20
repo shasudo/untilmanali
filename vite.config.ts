@@ -28,6 +28,5 @@ export default defineConfig({
     })
   ],
   server: { port: 5173, proxy: { '/api': 'http://localhost:8787' } },
-  build: { target: 'es2022', cssMinify: true, sourcemap: false },
-  define: { __BUILD_ID__: JSON.stringify(new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)) },
+  build: { target: 'es2022', cssMinify: true, sourcemap: false }
 })

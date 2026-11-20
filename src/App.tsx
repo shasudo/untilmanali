@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { CREW, ME_KEY, crewById } from './crew'
 import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory, type LogEntry, type Settle } from './api'
+import { buzz } from './feel'
 
 const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
 const WHEEL_R = 124
@@ -9,17 +10,55 @@ const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { maximumFractionDi
 const first = (id: string) => crewById(id).name.split(' ')[0]
 
 type Verse = 'home' | 'bills' | 'wall'
+type Sheet = 'expense' | 'memory' | 'log' | 'confirmSettle' | 'confirmTear' | null
 
 export default function App() {
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [bal, setBal] = useState<Balances | null>(null)
   const [wall, setWall] = useState<Memory[]>([])
-  const [verse, setVerse] = useState<Verse>('home')
+  const pathFor = (v: Verse) => (v === 'home' ? '/' : v === 'bills' ? '/fridge' : '/go-tos')
+  const verseFor = (p: string): Verse => (p === 'fridge' ? 'bills' : p === 'go-tos' ? 'wall' : 'home')
+  const [verse, setVerse] = useState<Verse>(() => verseFor(window.location.pathname.replace(/^\//, '')))
+  const [sheet, setSheet] = useState<Sheet>(null)
+  function go(v: Verse) {
+    setVerse(v)
+    window.scrollTo(0, 0)
+    const path = pathFor(v)
+    if (window.location.pathname !== path) window.history.pushState({ verse: v }, '', path)
+  }
+  const sheetRef = useRef<Sheet>(null)
+  useEffect(() => { sheetRef.current = sheet }, [sheet])
+  const dlgOpen = useRef(false)
+  function openSheet(s: NonNullable<Sheet>) {
+    setSheet(s)
+    if (!dlgOpen.current) {
+      dlgOpen.current = true
+      window.history.pushState({ sheet: s }, '', window.location.pathname + '#dlg')
+    }
+  }
+  function closeSheet() {
+    if (dlgOpen.current) window.history.back()
+    else setSheet(null)
+  }
+  useEffect(() => {
+    const onPop = () => {
+      if (sheetRef.current) {
+        dlgOpen.current = false
+        setPendingSettle(null); setPendingTear(null); setTearRelated([])
+        setSheet(null)
+        return
+      }
+      setVerse(verseFor(window.location.pathname.replace(/^\//, '')))
+      window.scrollTo(0, 0)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
   const [mineOnly, setMineOnly] = useState(true)
   const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || '')
   const [picked, setPicked] = useState(() => !!localStorage.getItem(ME_KEY))
-  const [sheet, setSheet] = useState<'expense' | 'memory' | 'log' | 'confirmSettle' | 'confirmTear' | null>(null)
   const [pendingSettle, setPendingSettle] = useState<{ from: string; to: string; amount: number } | null>(null)
+  const [flash, setFlash] = useState('')
   const [pendingTear, setPendingTear] = useState<Expense | null>(null)
   const [tearRelated, setTearRelated] = useState<Settle[]>([])
   const [log, setLog] = useState<LogEntry[]>([])
@@ -40,9 +79,9 @@ export default function App() {
   useEffect(() => { load() }, [])
   useEffect(() => { if (me) localStorage.setItem(ME_KEY, me) }, [me])
 
-  // Aggressive freshness for 6 people: new build? take it now.
-  // Same build? still re-pull the data — an open tab must never go stale.
-  // Retries until the new build actually runs — never pins a tab on stale code.
+  // Aggressive freshness for 6 people: a genuinely newer build reloads once
+  // onto it; otherwise just re-pull the data — an open tab must never go stale.
+  // First sighting in a tab never reloads (a reload there would kill the splash).
   useEffect(() => {
     let dead = false
     let timer: ReturnType<typeof setInterval> | undefined
@@ -50,12 +89,14 @@ export default function App() {
       try {
         const h = await (await fetch('/api/v1/health', { cache: 'no-store' })).json() as { build?: string }
         if (dead || !h.build) return
-        if (h.build !== __BUILD_ID__ && sessionStorage.getItem('um-fresh') !== h.build) {
+        const seen = sessionStorage.getItem('um-fresh')
+        if (seen && seen !== h.build) {
           sessionStorage.setItem('um-fresh', h.build)
           try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
           location.reload()
           return
         }
+        if (!seen) sessionStorage.setItem('um-fresh', h.build)
         if (refreshData && !dead) await load(true)
       } catch { /* offline — keep the old copy */ }
     }
@@ -79,17 +120,32 @@ export default function App() {
   const sumShares = Object.values(form.shares).reduce((s, v) => s + (Number(v) || 0), 0)
 
   const [zap, setZap] = useState({ id: '', n: 0 })
-  const [ss, setSs] = useState(true)
+  const [ss, setSs] = useState(() => {
+    try {
+      const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+      return !nav || nav.type === 'navigate'
+    } catch { return true }
+  })
   const [pingAsk, setPingAsk] = useState(false)
   const [pushOn, setPushOn] = useState(() => localStorage.getItem('untilmanali.push') === '1')
   const pushOk = typeof window !== 'undefined' && 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator
   const pushBlocked = typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'denied'
   function pick(id: string) {
+    buzz('select')
     setMe(id)
     localStorage.setItem(ME_KEY, id)
     setPicked(true)
     setZap((z) => ({ id, n: z.n + 1 }))
   }
+
+  // One light tap for every touchable thing; bigger moments buzz on their own.
+  useEffect(() => {
+    const onTouch = (e: Event) => {
+      if ((e.target as HTMLElement).closest('button, a, input, select, textarea')) buzz('tap')
+    }
+    document.addEventListener('pointerdown', onTouch)
+    return () => document.removeEventListener('pointerdown', onTouch)
+  }, [])
 
   async function freshSub(): Promise<PushSubscription> {
     const keyJson = await api.pushKey().catch(() => null)
@@ -140,7 +196,8 @@ export default function App() {
       await api.sub({ subscription: sub.toJSON(), crew: me })
       localStorage.setItem('untilmanali.push', '1')
       setPushOn(true)
-    } catch (e) { setErr(friendlyPushErr(e)) }
+      buzz('go')
+    } catch (e) { buzz('nope'); setErr(friendlyPushErr(e)) }
   }
 
   // One friendly ask per launch: pings on, once the splash is gone.
@@ -182,32 +239,39 @@ export default function App() {
     try {
       await api.add({ title: form.title.trim(), amount: amt, paidBy: me, split: form.split, involved: form.involved, shares })
       setForm({ title: '', amount: '', split: 'equal', involved: [], shares: {} })
-      setSheet(null); load()
-    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+      closeSheet(); load()
+      buzz('go')
+    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
 
   async function submitNote() {
     if (!note.text.trim()) { setErr('write something first, even one line'); return }
     try {
       await api.pin({ author: me, text: note.text.trim(), color: note.color })
-      setNote({ text: '', color: WALL_COLORS[0] }); setSheet(null); load()
-    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+      setNote({ text: '', color: WALL_COLORS[0] }); closeSheet(); load()
+      buzz('go')
+    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
 
   async function confirmSettle() {
     if (!pendingSettle) return
     try {
-      await api.settle(pendingSettle)
-      setPendingSettle(null); setSheet(null); load()
-    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+      const done = pendingSettle
+      await api.settle(done)
+      setPendingSettle(null); closeSheet(); load()
+      buzz('go')
+      setFlash(`✓ ${first(done.from)} → ${first(done.to)} · ${inr(done.amount)} sorted`)
+      setTimeout(() => setFlash(''), 4500)
+    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
 
   async function confirmTear(withSettlements: boolean) {
     if (!pendingTear) return
     try {
       await api.remove(pendingTear.id, withSettlements)
-      setPendingTear(null); setTearRelated([]); setSheet(null); load()
-    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+      setPendingTear(null); setTearRelated([]); closeSheet(); load()
+      buzz('go')
+    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
 
   async function askTear(e: Expense) {
@@ -215,7 +279,7 @@ export default function App() {
       const r = await api.related(e.id)
       setTearRelated(r.settlements)
     } catch { setTearRelated([]) }
-    setPendingTear(e); setSheet('confirmTear')
+    setPendingTear(e); openSheet('confirmTear')
   }
 
   async function submitLog() {
@@ -223,12 +287,13 @@ export default function App() {
     try {
       await api.addLog(newLog.trim(), devKey || undefined)
       setNewLog(''); load()
+      buzz('go')
     } catch (e) {
       const m = e instanceof Error ? e.message : ''
       if (m.includes('dev only')) {
         localStorage.removeItem('untilmanali.devkey'); setDevKey('')
         setErr('that dev key did not work')
-      } else setErr(m || 'did not stick, try again')
+      } else { buzz('nope'); setErr(m || 'did not stick, try again') }
     }
   }
 
@@ -242,7 +307,7 @@ export default function App() {
 
   function openExpense() {
     setForm((f) => ({ ...f, involved: [] }))
-    setSheet('expense')
+    openSheet('expense')
   }
 
   return (
@@ -278,15 +343,15 @@ export default function App() {
             </div>
 
             <div className="jumps">
-              <button className="jump" onClick={() => setVerse('bills')}>
+              <button className="jump" onClick={() => go('bills')}>
                 open my fridge <small>{myExpenses.length} with my name · {inr(total)} in pot</small>
               </button>
               {myDebts.length > 0 && (
-                <button className="jump" onClick={() => setVerse('bills')}>
+                <button className="jump" onClick={() => go('bills')}>
                   sorting out <small>{myDebts.length} of mine to sort</small>
                 </button>
               )}
-              <button className="jump" onClick={() => setVerse('wall')}>
+              <button className="jump" onClick={() => go('wall')}>
                 the go-to list <small>{wall.length} pins</small>
               </button>
               <button className="jump" onClick={togglePush}>
@@ -295,7 +360,7 @@ export default function App() {
               <button className="jump" onClick={() => setSs(true)}>
                 6–7 <small>certified brainrot</small>
               </button>
-              <button className="jump" onClick={() => setSheet('log')}>
+              <button className="jump" onClick={() => openSheet('log')}>
                 what’s new <small>{log.length} notes</small>
               </button>
             </div>
@@ -314,8 +379,8 @@ export default function App() {
                 <div className="iou" key={i}>
                   <span className="iou-text">{first(d.from)} owes {first(d.to)} <b>{inr(d.amount)}</b></span>
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto' }}>
-                    {upi[d.to] && d.from === me && <a className="paylink" href={payLink(d.to, d.amount)} onClick={() => { setPendingSettle(d); setSheet('confirmSettle') }}>pay</a>}
-                    <button className="stampbtn" onClick={() => { setPendingSettle(d); setSheet('confirmSettle') }}>sorted</button>
+                    {upi[d.to] && d.from === me && <a className="paylink" href={payLink(d.to, d.amount)} onClick={() => { setPendingSettle(d); openSheet('confirmSettle') }}>pay</a>}
+                    <button className="stampbtn" onClick={() => { setPendingSettle(d); openSheet('confirmSettle') }}>sorted</button>
                   </span>
                 </div>
               ))}
@@ -332,11 +397,19 @@ export default function App() {
                         : e.split === 'percent' ? 'by percent' : 'exact bits'} · {new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
                     </div>
                     <div className="parts">
-                      {Object.entries(e.breakdown).filter(([, v]) => v > 0).map(([id, v]) => (
+                      {Object.entries(e.remaining ?? e.breakdown).filter(([, v]) => v > 0.005).map(([id, v]) => (
                         <span key={id} className={'part' + (id === me ? ' me' : '')}>{first(id)} {inr(v)}</span>
                       ))}
                     </div>
-                    {e.rounded && <div className="paidline">incl. ₹1 round-off — the odd paise went to the last head</div>}
+                    {(() => {
+                      const orig = Object.entries(e.breakdown).filter(([id]) => id !== e.paidBy).reduce((a, [, v]) => a + v, 0)
+                      const left = Object.values(e.remaining ?? {}).reduce((a, v) => a + v, 0)
+                      const paid = Math.round((orig - left) * 100) / 100
+                      return (<>
+                        {paid > 0.005 && <div className="paidline">₹{Math.round(paid)} already paid on this</div>}
+                        {e.rounded && <div className="paidline">incl. ₹1 round-off — the odd paise went to the last head</div>}
+                      </>)
+                    })()}
                   </div>
                   <div className="stub">
                     <span className="amt">{inr(e.amount)}</span>
@@ -361,7 +434,7 @@ export default function App() {
                   <small>— {first(m.author)}</small>
                 </div>
               ))}
-              <button className="addnote" onClick={() => setSheet('memory')}>+ pin a go-to…</button>
+              <button className="addnote" onClick={() => openSheet('memory')}>+ pin a go-to…</button>
             </section>
             {wall.length === 0 && <p className="hintline" style={{ marginTop: 8 }}>first one writes itself: where were you when this pot started?</p>}
           </section>
@@ -411,7 +484,7 @@ export default function App() {
 
       <nav className="nav" aria-label="Spaces">
         {(['home', 'bills', 'wall'] as Verse[]).map((v) => (
-          <button key={v} aria-current={verse === v} onClick={() => { setVerse(v); window.scrollTo(0, 0) }}>
+          <button key={v} aria-current={verse === v} onClick={() => go(v)}>
             {v === 'home' ? 'home' : v === 'bills' ? 'fridge' : 'go-tos'}
           </button>
         ))}
@@ -421,12 +494,12 @@ export default function App() {
         <button className="fab-round" aria-label="Stick a new bill" onClick={openExpense}>+</button>
       )}
       {verse === 'wall' && !sheet && (
-        <button className="fab-round" aria-label="Pin a memory" onClick={() => setSheet('memory')}>+</button>
+        <button className="fab-round" aria-label="Pin a memory" onClick={() => openSheet('memory')}>+</button>
       )}
 
       {sheet && (
         <>
-          <div className="scrim" onClick={() => setSheet(null)} />
+          <div className="scrim" onClick={() => closeSheet()} />
           <div className="sheet" role="dialog" aria-label="Crew dialog">
             {sheet === 'expense' ? (
               <>
@@ -472,7 +545,7 @@ export default function App() {
                   <p className="livecalc">bits so far: {form.split === 'percent' ? `${sumShares}% of 100%` : `${inr(sumShares)} of ${inr(amt)}`}</p>
                 )}
                 <div className="saverow">
-                  <button className="cancel" onClick={() => setSheet(null)}>nah</button>
+                  <button className="cancel" onClick={() => closeSheet()}>nah</button>
                   <button className="save" onClick={submitExpense}>stick it up</button>
                 </div>
               </>
@@ -487,7 +560,7 @@ export default function App() {
                   ))}
                 </div>
                 <div className="saverow">
-                  <button className="cancel" onClick={() => setSheet(null)}>nah</button>
+                  <button className="cancel" onClick={() => closeSheet()}>nah</button>
                   <button className="save" onClick={submitNote}>pin it — {first(me)}</button>
                 </div>
               </>
@@ -504,7 +577,7 @@ export default function App() {
                   <>
                     <label className="f">add a line<textarea className="t" value={newLog} onChange={(e) => setNewLog(e.target.value)} placeholder="pings now buzz for crossed-off go-tos…" maxLength={280} /></label>
                     <div className="saverow">
-                      <button className="cancel" onClick={() => setSheet(null)}>close</button>
+                      <button className="cancel" onClick={() => closeSheet()}>close</button>
                       <button className="save" onClick={submitLog}>post it</button>
                     </div>
                   </>
@@ -514,7 +587,7 @@ export default function App() {
                       <button onClick={unlockDev}>dev? add news</button>
                     </div>
                     <div className="saverow">
-                      <button className="cancel" onClick={() => setSheet(null)}>close</button>
+                      <button className="cancel" onClick={() => closeSheet()}>close</button>
                     </div>
                   </>
                 )}
@@ -527,7 +600,7 @@ export default function App() {
                   <p className="hintline">{tearRelated.length} payment{tearRelated.length === 1 ? '' : 's'} point{tearRelated.length === 1 ? 's' : ''} at this bill ({tearRelated.map((s) => `${first(s.from)} ₹${Math.round(s.amount)}`).join(', ')}) — take {tearRelated.length === 1 ? 'it' : 'them'} along, or leave {tearRelated.length === 1 ? 'it' : 'them'} standing.</p>
                 )}
                 <div className="saverow">
-                  <button className="cancel" onClick={() => { setPendingTear(null); setTearRelated([]); setSheet(null) }}>keep it</button>
+                  <button className="cancel" onClick={() => { setPendingTear(null); setTearRelated([]); closeSheet() }}>keep it</button>
                   <button className="cancel" onClick={() => confirmTear(false)}>bill only</button>
                   {tearRelated.length > 0 && <button className="save" onClick={() => confirmTear(true)}>bill + ₹{Math.round(tearRelated.reduce((s, x) => s + x.amount, 0))}</button>}
                   {tearRelated.length === 0 && <button className="save" onClick={() => confirmTear(false)}>tear it</button>}
@@ -538,7 +611,7 @@ export default function App() {
                 <h2>mark sorted?</h2>
                 <p className="hintline">{pendingSettle ? `${first(pendingSettle.from)} → ${first(pendingSettle.to)} · ${inr(pendingSettle.amount)}` : ''} — tap “yes, paid” only if the money really moved.</p>
                 <div className="saverow">
-                  <button className="cancel" onClick={() => { setPendingSettle(null); setSheet(null) }}>cancel</button>
+                  <button className="cancel" onClick={() => { setPendingSettle(null); closeSheet() }}>cancel</button>
                   <button className="save" onClick={confirmSettle}>yes, paid</button>
                 </div>
               </>

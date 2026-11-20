@@ -7,6 +7,7 @@ export type Expense = {
   shares: Record<string, number>
   involved: string[]
   breakdown: Record<string, number>
+  remaining: Record<string, number>
   rounded: boolean
   createdAt: string
 }

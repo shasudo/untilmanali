@@ -35,15 +35,16 @@ follows that chip.
 - The fridge opens on **your** bills only — pick your face on the wheel and that's your world.
 - **show everyone** flips to the full crew view when you're curious.
 - Owe someone? Only YOUR lines show **pay** — it opens GPay/PhonePe with their UPI ID and the exact amount filled in. When you return, the app asks: mark sorted, or not yet.
-- Each ticket shows who paid, who owes what, and the total stub.
+- Each ticket shows who paid, what's still owed on it (paid-down shares shrink live), and the total stub.
 - Your own share is highlighted lime.
 - Wrong ticket? **tear off** asks first. If payments point at it, choose: bill only, or bill + those payments ("gone for everyone, no undo").
 
 ## Settle up
 
 Under your faces, lines like "Koushik owes Rushi ₹300" appear.
-Pay the person (cash, UPI, whatever), then tap **sorted** — it asks you to confirm the exact from → to → amount first, so pocket-taps can't move money. Tap **yes, paid** only if money really moved; **cancel** records nothing.
+Pay the person (cash, UPI, whatever), then tap **sorted** — it asks you to confirm the exact from → to → amount first, so pocket-taps can't move money. Tap **yes, paid** only if money really moved; **cancel** records nothing. A green banner confirms each recorded payment — settling one line can shrink the others instead of erasing them, since the app re-splits what's left.
 When every share of a bill is covered, the bill tears itself off. Nothing to clean up.
+Settle the last open line and the whole fridge resets to a clean slate — when nobody owes anybody, there is nothing left to show.
 Settle fast — that's the whole rule.
 
 ## The go-to list

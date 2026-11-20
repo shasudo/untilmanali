@@ -162,13 +162,14 @@ const app = new Hono()
 // Open crew app: no auth. Anyone who can reach the address is in.
 // --- Module: expenses (extract to modules/expenses/routes.ts when adding module 2) ---
 app.get('/api/v1/expenses', (c) => {
+  const { rem, torn } = allocate()
   const rows = db.prepare('SELECT * FROM expenses ORDER BY id DESC LIMIT 300').all()
   return c.json({
-    expenses: rows.map((r) => ({
+    expenses: rows.filter((r) => !torn.has(r.id)).map((r) => ({
       id: r.id, title: r.title, amount: r.amount, paidBy: r.paid_by,
       split: r.split, shares: JSON.parse(r.shares || '{}'),
-      involved: involvedList(r), breakdown: breakdown(r), rounded: wasRounded(r),
-      createdAt: r.created_at + 'Z',
+      involved: involvedList(r), breakdown: breakdown(r), remaining: rem.get(r.id),
+      rounded: wasRounded(r), createdAt: r.created_at + 'Z',
     })),
   })
 })
@@ -200,18 +201,10 @@ app.post('/api/v1/expenses', async (c) => {
   return c.json({ id: r.id })
 })
 
-// Payments that belong to a bill: from someone in on it (not the payer),
-// to the payer, made after the bill. Used to offer bill+payments tear-off.
-function relatedSettles(e) {
-  const inv = involvedList(e)
-  return db.prepare('SELECT * FROM settlements WHERE to_id = ? AND created_at >= ? ORDER BY id ASC').all(e.paid_by, e.created_at)
-    .filter((s) => s.from_id !== e.paid_by && inv.includes(s.from_id))
-}
-
 app.get('/api/v1/expenses/:id/related', (c) => {
-  const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(Number(c.req.param('id')))
-  if (!row) return c.json({ settlements: [] })
-  const rows = relatedSettles(row)
+  const id = Number(c.req.param('id'))
+  const { settles, takes } = allocate()
+  const rows = settles.filter((s) => ((takes.get(s.id) || {})[id] || 0) > 0.005)
   return c.json({ settlements: rows.map((r) => ({ id: r.id, from: r.from_id, to: r.to_id, amount: r.amount, createdAt: r.created_at + 'Z' })) })
 })
 
@@ -220,7 +213,10 @@ app.delete('/api/v1/expenses/:id', async (c) => {
   const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
   const url = new URL(c.req.url)
   if (row && url.searchParams.get('withSettlements') === '1') {
-    for (const s of relatedSettles(row)) db.prepare('DELETE FROM settlements WHERE id = ?').run(s.id)
+    const { settles, takes } = allocate()
+    for (const s of settles) {
+      if (((takes.get(s.id) || {})[id] || 0) > 0.005) db.prepare('DELETE FROM settlements WHERE id = ?').run(s.id)
+    }
   }
   db.prepare('DELETE FROM expenses WHERE id = ?').run(id)
   if (row) notifyExcept('', { title: `torn off: ${row.title} · ₹${row.amount}`, body: 'tap to see the fridge' }).catch(() => {})
@@ -266,10 +262,18 @@ app.post('/api/v1/settle', async (c) => {
   if (!CREW.includes(from) || !CREW.includes(to) || from === to || !(Number(amount) > 0)) {
     return c.text('bad settlement', 400)
   }
-  db.prepare('INSERT INTO settlements (from_id, to_id, amount) VALUES (?, ?, ?)').run(from, to, Math.round(Number(amount) * 100) / 100)
+  const ins = db.prepare('INSERT INTO settlements (from_id, to_id, amount) VALUES (?, ?, ?) RETURNING id').get(from, to, Math.round(Number(amount) * 100) / 100)
   notifyExcept(from, { title: `${firstName(from)} sorted ₹${amount} to ${firstName(to)}`, body: 'debts updated — tap to see' }).catch(() => {})
-  const cleared = autoTearOff()
-  return c.json({ ok: true, cleared, ...balances() })
+  const { torn, takes, expenses } = allocate()
+  const myTakes = takes.get(ins.id) || {}
+  const cleared = expenses.filter((e) => torn.has(e.id) && (myTakes[e.id] || 0) > 0.005).map((e) => e.title)
+  let result = balances()
+  if (result.debts.length === 0 && (expenses.length > 0 || db.prepare('SELECT COUNT(*) c FROM settlements').get().c > 0)) {
+    db.exec('DELETE FROM expenses; DELETE FROM settlements')
+    notifyExcept('', { title: 'fridge’s clean — nothing owed anywhere', body: 'fresh slate. tap to see' }).catch(() => {})
+    result = balances()
+  }
+  return c.json({ ok: true, cleared, ...result })
 })
 
 app.get('/api/v1/health', (c) => c.json({ ok: true, crew: 6, module: 'expenses', version: VERSION, build: BUILD, push: PUSH_ON }))
@@ -290,12 +294,10 @@ app.post('/api/v1/upi', async (c) => {
   return c.json({ ok: true })
 })
 
-// Auto tear-off: a bill disappears on its own once every share of it is
-// covered by settles (oldest bill first, exact from→to matching, so one
-// payment can never clear two bills). Consumed settles are pruned with the
-// bills they covered (leftovers stay as credit); otherwise torn bills would
-// leave phantom debts behind. Only whole-paise remainders keep a bill up.
-function autoTearOff() {
+// Allocation: oldest-first, exact from→to. PURE — no writes. Torn-ness,
+// related lists and cleared responses all derive from this one pass, so a
+// payment can never clear two bills and nothing is ever deleted implicitly.
+function allocate() {
   const expenses = db.prepare('SELECT * FROM expenses ORDER BY id ASC').all()
   const settles = db.prepare('SELECT * FROM settlements ORDER BY id ASC').all()
   const rem = new Map()
@@ -307,9 +309,10 @@ function autoTearOff() {
     }
     rem.set(e.id, m)
   }
-  const left = new Map()
+  const takes = new Map()
   for (const s of settles) {
     let amt = s.amount
+    const tk = {}
     for (const e of expenses) {
       if (amt <= 0.005) break
       if (e.paid_by !== s.to_id) continue
@@ -319,23 +322,13 @@ function autoTearOff() {
         const take = Math.min(o, amt)
         m[s.from_id] = Math.round((o - take) * 100) / 100
         amt = Math.round((amt - take) * 100) / 100
+        tk[e.id] = Math.round(((tk[e.id] || 0) + take) * 100) / 100
       }
     }
-    left.set(s.id, amt)
+    takes.set(s.id, tk)
   }
-  const gone = []
-  for (const e of expenses) {
-    if (Object.values(rem.get(e.id)).every((v) => v < 0.005)) {
-      db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id)
-      gone.push(e.title)
-    }
-  }
-  for (const s of settles) {
-    const r = left.get(s.id)
-    if (r < 0.005) db.prepare('DELETE FROM settlements WHERE id = ?').run(s.id)
-    else if (Math.abs(r - s.amount) > 0.005) db.prepare('UPDATE settlements SET amount = ? WHERE id = ?').run(r, s.id)
-  }
-  return gone
+  const torn = new Set(expenses.filter((e) => Object.values(rem.get(e.id)).every((v) => v < 0.005)).map((e) => e.id))
+  return { expenses, settles, rem, takes, torn }
 }
 
 // --- Module: push (Web Push subscriptions) ---
