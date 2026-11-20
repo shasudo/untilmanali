@@ -7,6 +7,7 @@ export type Expense = {
   shares: Record<string, number>
   involved: string[]
   breakdown: Record<string, number>
+  rounded: boolean
   createdAt: string
 }
 
@@ -22,6 +23,14 @@ export type Memory = {
   text: string
   color: string
   done: number
+  createdAt: string
+}
+
+export type Settle = {
+  id: number
+  from: string
+  to: string
+  amount: number
   createdAt: string
 }
 
@@ -53,7 +62,9 @@ export const api = {
   balances: () => req('/api/v1/balances') as Promise<Balances>,
   add: (b: { title: string; amount: number; paidBy: string; split: string; involved: string[]; shares?: Record<string, number> }) =>
     req('/api/v1/expenses', { method: 'POST', body: JSON.stringify(b) }),
-  remove: (id: number) => req(`/api/v1/expenses/${id}`, { method: 'DELETE' }),
+  remove: (id: number, withSettlements = false) =>
+    req(`/api/v1/expenses/${id}${withSettlements ? '?withSettlements=1' : ''}`, { method: 'DELETE' }),
+  related: (id: number) => req(`/api/v1/expenses/${id}/related`) as Promise<{ settlements: Settle[] }>,
   settle: (b: { from: string; to: string; amount: number }) =>
     req('/api/v1/settle', { method: 'POST', body: JSON.stringify(b) }),
   wall: () => req('/api/v1/memories') as Promise<{ memories: Memory[] }>,

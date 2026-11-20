@@ -119,6 +119,21 @@ function involvedList(e) {
 }
 
 // Per-person share of one expense row. Handles equal/custom/percent + penny fix.
+function decPlaces(n) {
+  const s = String(n).split('.')
+  return s.length < 2 ? 0 : s[1].length
+}
+
+// True when the penny fix actually moved a paise: uneven equal splits
+// or percent shares that don't land on whole paise. Custom is exact by construction.
+function wasRounded(e) {
+  const inv = involvedList(e)
+  if (e.split === 'custom') return false
+  if (e.split === 'equal') return decPlaces(e.amount / inv.length) > 2
+  const s = JSON.parse(e.shares || '{}')
+  return inv.some((id) => decPlaces(e.amount * Number(s[id] || 0) / 100) > 2)
+}
+
 function breakdown(e) {
   const inv = involvedList(e)
   const out = {}
@@ -152,7 +167,7 @@ app.get('/api/v1/expenses', (c) => {
     expenses: rows.map((r) => ({
       id: r.id, title: r.title, amount: r.amount, paidBy: r.paid_by,
       split: r.split, shares: JSON.parse(r.shares || '{}'),
-      involved: involvedList(r), breakdown: breakdown(r),
+      involved: involvedList(r), breakdown: breakdown(r), rounded: wasRounded(r),
       createdAt: r.created_at + 'Z',
     })),
   })
@@ -185,9 +200,28 @@ app.post('/api/v1/expenses', async (c) => {
   return c.json({ id: r.id })
 })
 
-app.delete('/api/v1/expenses/:id', (c) => {
+// Payments that belong to a bill: from someone in on it (not the payer),
+// to the payer, made after the bill. Used to offer bill+payments tear-off.
+function relatedSettles(e) {
+  const inv = involvedList(e)
+  return db.prepare('SELECT * FROM settlements WHERE to_id = ? AND created_at >= ? ORDER BY id ASC').all(e.paid_by, e.created_at)
+    .filter((s) => s.from_id !== e.paid_by && inv.includes(s.from_id))
+}
+
+app.get('/api/v1/expenses/:id/related', (c) => {
+  const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(Number(c.req.param('id')))
+  if (!row) return c.json({ settlements: [] })
+  const rows = relatedSettles(row)
+  return c.json({ settlements: rows.map((r) => ({ id: r.id, from: r.from_id, to: r.to_id, amount: r.amount, createdAt: r.created_at + 'Z' })) })
+})
+
+app.delete('/api/v1/expenses/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
+  const url = new URL(c.req.url)
+  if (row && url.searchParams.get('withSettlements') === '1') {
+    for (const s of relatedSettles(row)) db.prepare('DELETE FROM settlements WHERE id = ?').run(s.id)
+  }
   db.prepare('DELETE FROM expenses WHERE id = ?').run(id)
   if (row) notifyExcept('', { title: `torn off: ${row.title} · ₹${row.amount}`, body: 'tap to see the fridge' }).catch(() => {})
   return c.json({ ok: true })
@@ -234,7 +268,8 @@ app.post('/api/v1/settle', async (c) => {
   }
   db.prepare('INSERT INTO settlements (from_id, to_id, amount) VALUES (?, ?, ?)').run(from, to, Math.round(Number(amount) * 100) / 100)
   notifyExcept(from, { title: `${firstName(from)} sorted ₹${amount} to ${firstName(to)}`, body: 'debts updated — tap to see' }).catch(() => {})
-  return c.json({ ok: true, ...balances() })
+  const cleared = autoTearOff()
+  return c.json({ ok: true, cleared, ...balances() })
 })
 
 app.get('/api/v1/health', (c) => c.json({ ok: true, crew: 6, module: 'expenses', version: VERSION, build: BUILD, push: PUSH_ON }))
@@ -255,7 +290,56 @@ app.post('/api/v1/upi', async (c) => {
   return c.json({ ok: true })
 })
 
+// Auto tear-off: a bill disappears on its own once every share of it is
+// covered by settles (oldest bill first, exact from→to matching, so one
+// payment can never clear two bills). Consumed settles are pruned with the
+// bills they covered (leftovers stay as credit); otherwise torn bills would
+// leave phantom debts behind. Only whole-paise remainders keep a bill up.
+function autoTearOff() {
+  const expenses = db.prepare('SELECT * FROM expenses ORDER BY id ASC').all()
+  const settles = db.prepare('SELECT * FROM settlements ORDER BY id ASC').all()
+  const rem = new Map()
+  for (const e of expenses) {
+    const parts = breakdown(e)
+    const m = {}
+    for (const id of involvedList(e)) {
+      if (id !== e.paid_by && (parts[id] || 0) > 0) m[id] = parts[id]
+    }
+    rem.set(e.id, m)
+  }
+  const left = new Map()
+  for (const s of settles) {
+    let amt = s.amount
+    for (const e of expenses) {
+      if (amt <= 0.005) break
+      if (e.paid_by !== s.to_id) continue
+      const m = rem.get(e.id)
+      const o = m[s.from_id] || 0
+      if (o > 0.005) {
+        const take = Math.min(o, amt)
+        m[s.from_id] = Math.round((o - take) * 100) / 100
+        amt = Math.round((amt - take) * 100) / 100
+      }
+    }
+    left.set(s.id, amt)
+  }
+  const gone = []
+  for (const e of expenses) {
+    if (Object.values(rem.get(e.id)).every((v) => v < 0.005)) {
+      db.prepare('DELETE FROM expenses WHERE id = ?').run(e.id)
+      gone.push(e.title)
+    }
+  }
+  for (const s of settles) {
+    const r = left.get(s.id)
+    if (r < 0.005) db.prepare('DELETE FROM settlements WHERE id = ?').run(s.id)
+    else if (Math.abs(r - s.amount) > 0.005) db.prepare('UPDATE settlements SET amount = ? WHERE id = ?').run(r, s.id)
+  }
+  return gone
+}
+
 // --- Module: push (Web Push subscriptions) ---
+
 app.get('/api/v1/push/key', (c) => {
   if (!PUSH_ON) return c.text('pings off', 404)
   return c.json({ key: process.env.VAPID_PUBLIC_KEY })
@@ -291,7 +375,8 @@ app.get('/api/v1/memories', (c) => {
 app.post('/api/v1/memories', async (c) => {
   const b = await c.req.json()
   const author = String(b.author || '')
-  const text = String(b.text || '').trim().slice(0, 280)
+  const text = String(b.text || '').trim()
+  if (!text || text.length > 280) return c.text('bad memory', 400)
   const color = WALL_COLORS.includes(b.color) ? b.color : WALL_COLORS[0]
   if (!CREW.includes(author) || !text) return c.text('bad memory', 400)
   const r = db.prepare('INSERT INTO memories (author, text, color) VALUES (?, ?, ?) RETURNING id').get(author, text, color)
@@ -344,8 +429,8 @@ app.get('/api/v1/changelog', (c) => {
 app.post('/api/v1/changelog', async (c) => {
   if (!process.env.DEV_KEY || c.req.header('x-dev-key') !== process.env.DEV_KEY) return c.text('dev only', 403)
   const b = await c.req.json().catch(() => ({}))
-  const text = String(b.text || '').trim().slice(0, 280)
-  if (!text) return c.text('bad entry', 400)
+  const text = String(b.text || '').trim()
+  if (!text || text.length > 280) return c.text('bad entry', 400)
   const r = db.prepare('INSERT INTO changelog (text) VALUES (?) RETURNING id').get(text)
   notifyExcept('', { title: 'what’s new in UntilManali', body: text.slice(0, 90) }).catch(() => {})
   return c.json({ id: r.id })

@@ -12,14 +12,15 @@ For the 6: Shathwik, Koushik, Deepika, Srinivas, Rushi (CR), Sonika.
 
 ## Tell it who you are
 
-Tap your face at the top. It turns lime with a star. Everything
-personal — "you owe / you get back" — follows that chip.
+First launch asks once: tap YOUR face, and the phone remembers it after that.
+It turns lime with a star. Everything personal — "you owe / you get back" —
+follows that chip.
 
 ## Stick a new bill
 
 1. Tap **+ stick a new bill**.
 2. Name it loosely: "fuel after chandigarh", "maggi x6". Amount in ₹.
-3. **Who paid** — the person who actually paid.
+3. The bill is always paid by YOU (your selected face) — no picker. Recording one someone else paid? Tap their face first, then stick it.
 4. **Who was in on it** — tap faces to include or drop people.
    Only 3 of you went? Drop the other 3, the math follows.
 5. Split it three ways:
@@ -33,16 +34,17 @@ personal — "you owe / you get back" — follows that chip.
 
 - The fridge opens on **your** bills only — pick your face on the wheel and that's your world.
 - **show everyone** flips to the full crew view when you're curious.
-- Owe someone? Tap **pay** on the line — it opens GPay/PhonePe with their UPI ID and the exact amount filled in. Then tap **sorted**.
+- Owe someone? Only YOUR lines show **pay** — it opens GPay/PhonePe with their UPI ID and the exact amount filled in. When you return, the app asks: mark sorted, or not yet.
 - Each ticket shows who paid, who owes what, and the total stub.
 - Your own share is highlighted lime.
-- Wrong ticket? **tear off** deletes it for everyone. Re-stick it right.
+- Wrong ticket? **tear off** asks first. If payments point at it, choose: bill only, or bill + those payments ("gone for everyone, no undo").
 
 ## Settle up
 
 Under your faces, lines like "Koushik owes Rushi ₹300" appear.
-Pay the person (cash, UPI, whatever), then tap **sorted**.
-The line disappears. Settle fast — that's the whole rule.
+Pay the person (cash, UPI, whatever), then tap **sorted** — it asks you to confirm the exact from → to → amount first, so pocket-taps can't move money. Tap **yes, paid** only if money really moved; **cancel** records nothing.
+When every share of a bill is covered, the bill tears itself off. Nothing to clean up.
+Settle fast — that's the whole rule.
 
 ## The go-to list
 

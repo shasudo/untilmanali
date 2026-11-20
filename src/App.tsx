@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CREW, ME_KEY, crewById } from './crew'
-import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory, type LogEntry } from './api'
+import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory, type LogEntry, type Settle } from './api'
 
 const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
 const WHEEL_R = 124
@@ -16,45 +16,56 @@ export default function App() {
   const [wall, setWall] = useState<Memory[]>([])
   const [verse, setVerse] = useState<Verse>('home')
   const [mineOnly, setMineOnly] = useState(true)
-  const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || 'shathwik')
-  const [sheet, setSheet] = useState<'expense' | 'memory' | 'log' | null>(null)
+  const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || '')
+  const [picked, setPicked] = useState(() => !!localStorage.getItem(ME_KEY))
+  const [sheet, setSheet] = useState<'expense' | 'memory' | 'log' | 'confirmSettle' | 'confirmTear' | null>(null)
+  const [pendingSettle, setPendingSettle] = useState<{ from: string; to: string; amount: number } | null>(null)
+  const [pendingTear, setPendingTear] = useState<Expense | null>(null)
+  const [tearRelated, setTearRelated] = useState<Settle[]>([])
   const [log, setLog] = useState<LogEntry[]>([])
   const [newLog, setNewLog] = useState('')
   const [upi, setUpi] = useState<Record<string, string>>({})
   const [devKey, setDevKey] = useState(() => localStorage.getItem('untilmanali.devkey') || '')
   const [err, setErr] = useState('')
-  const [form, setForm] = useState<{ title: string; amount: string; paidBy: string; split: string; involved: string[]; shares: Record<string, string> }>({ title: '', amount: '', paidBy: 'shathwik', split: 'equal', involved: [], shares: {} })
+  const [form, setForm] = useState<{ title: string; amount: string; split: string; involved: string[]; shares: Record<string, string> }>({ title: '', amount: '', split: 'equal', involved: [], shares: {} })
   const [note, setNote] = useState({ text: '', color: WALL_COLORS[0] })
 
-  async function load() {
+  async function load(silent = false) {
     try {
-      setErr('')
+      if (!silent) setErr('')
       const [e, b, w, l, u] = await Promise.all([api.list(), api.balances(), api.wall(), api.log(), api.upi()])
       setExpenses(e.expenses); setBal(b); setWall(w.memories); setLog(l.entries); setUpi(u.handles)
-    } catch (e) { setErr(e instanceof Error ? e.message : 'could not reach home base') }
+    } catch (e) { if (!silent) setErr(e instanceof Error ? e.message : 'could not reach home base') }
   }
   useEffect(() => { load() }, [])
-  useEffect(() => { localStorage.setItem(ME_KEY, me) }, [me])
+  useEffect(() => { if (me) localStorage.setItem(ME_KEY, me) }, [me])
 
-  // Aggressive freshness for 6 people: if the server runs a newer build, take it now.
+  // Aggressive freshness for 6 people: new build? take it now.
+  // Same build? still re-pull the data — an open tab must never go stale.
   // Retries until the new build actually runs — never pins a tab on stale code.
   useEffect(() => {
     let dead = false
     let timer: ReturnType<typeof setInterval> | undefined
-    const check = async () => {
+    const check = async (refreshData = true) => {
       try {
         const h = await (await fetch('/api/v1/health', { cache: 'no-store' })).json() as { build?: string }
-        if (dead || !h.build || h.build === __BUILD_ID__ || sessionStorage.getItem('um-fresh') === h.build) return
-        sessionStorage.setItem('um-fresh', h.build)
-        try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
-        location.reload()
+        if (dead || !h.build) return
+        if (h.build !== __BUILD_ID__ && sessionStorage.getItem('um-fresh') !== h.build) {
+          sessionStorage.setItem('um-fresh', h.build)
+          try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
+          location.reload()
+          return
+        }
+        if (refreshData && !dead) await load(true)
       } catch { /* offline — keep the old copy */ }
     }
-    check()
-    timer = setInterval(check, 60000)
-    const onVis = () => { if (document.visibilityState === 'visible') check() }
+    check(false)
+    timer = setInterval(() => check(true), 60000)
+    const onVis = () => { if (document.visibilityState === 'visible') check(true) }
+    const onFocus = () => check(true)
     document.addEventListener('visibilitychange', onVis)
-    return () => { dead = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVis) }
+    window.addEventListener('focus', onFocus)
+    return () => { dead = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onFocus) }
   }, [])
 
   const total = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses])
@@ -72,9 +83,11 @@ export default function App() {
   const [pingAsk, setPingAsk] = useState(false)
   const [pushOn, setPushOn] = useState(() => localStorage.getItem('untilmanali.push') === '1')
   const pushOk = typeof window !== 'undefined' && 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator
+  const pushBlocked = typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'denied'
   function pick(id: string) {
     setMe(id)
-    setForm((f) => ({ ...f, paidBy: id }))
+    localStorage.setItem(ME_KEY, id)
+    setPicked(true)
     setZap((z) => ({ id, n: z.n + 1 }))
   }
 
@@ -167,8 +180,8 @@ export default function App() {
       if (Math.abs(sum - need) > 0.01) { setErr(`those bits add to ${unit}${sum}, need ${unit}${need}`); return }
     }
     try {
-      await api.add({ title: form.title.trim(), amount: amt, paidBy: form.paidBy, split: form.split, involved: form.involved, shares })
-      setForm({ title: '', amount: '', paidBy: me, split: 'equal', involved: [], shares: {} })
+      await api.add({ title: form.title.trim(), amount: amt, paidBy: me, split: form.split, involved: form.involved, shares })
+      setForm({ title: '', amount: '', split: 'equal', involved: [], shares: {} })
       setSheet(null); load()
     } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
@@ -179,6 +192,30 @@ export default function App() {
       await api.pin({ author: me, text: note.text.trim(), color: note.color })
       setNote({ text: '', color: WALL_COLORS[0] }); setSheet(null); load()
     } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+  }
+
+  async function confirmSettle() {
+    if (!pendingSettle) return
+    try {
+      await api.settle(pendingSettle)
+      setPendingSettle(null); setSheet(null); load()
+    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+  }
+
+  async function confirmTear(withSettlements: boolean) {
+    if (!pendingTear) return
+    try {
+      await api.remove(pendingTear.id, withSettlements)
+      setPendingTear(null); setTearRelated([]); setSheet(null); load()
+    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+  }
+
+  async function askTear(e: Expense) {
+    try {
+      const r = await api.related(e.id)
+      setTearRelated(r.settlements)
+    } catch { setTearRelated([]) }
+    setPendingTear(e); setSheet('confirmTear')
   }
 
   async function submitLog() {
@@ -204,7 +241,7 @@ export default function App() {
     `upi://pay?pa=${encodeURIComponent(upi[to])}&pn=${encodeURIComponent(first(to))}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent('UntilManali')}`
 
   function openExpense() {
-    setForm((f) => ({ ...f, paidBy: me, involved: [] }))
+    setForm((f) => ({ ...f, involved: [] }))
     setSheet('expense')
   }
 
@@ -252,6 +289,9 @@ export default function App() {
               <button className="jump" onClick={() => setVerse('wall')}>
                 the go-to list <small>{wall.length} pins</small>
               </button>
+              <button className="jump" onClick={togglePush}>
+                notification <small>{pushOn ? `on for ${first(me)}` : pushBlocked ? 'blocked in browser settings' : pushOk ? 'off — tap to switch on' : 'not on this browser'}</small>
+              </button>
               <button className="jump" onClick={() => setSs(true)}>
                 6–7 <small>certified brainrot</small>
               </button>
@@ -274,8 +314,8 @@ export default function App() {
                 <div className="iou" key={i}>
                   <span className="iou-text">{first(d.from)} owes {first(d.to)} <b>{inr(d.amount)}</b></span>
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto' }}>
-                    {upi[d.to] && <a className="paylink" href={payLink(d.to, d.amount)}>pay</a>}
-                    <button className="stampbtn" onClick={async () => { await api.settle(d); load() }}>sorted</button>
+                    {upi[d.to] && d.from === me && <a className="paylink" href={payLink(d.to, d.amount)} onClick={() => { setPendingSettle(d); setSheet('confirmSettle') }}>pay</a>}
+                    <button className="stampbtn" onClick={() => { setPendingSettle(d); setSheet('confirmSettle') }}>sorted</button>
                   </span>
                 </div>
               ))}
@@ -296,10 +336,11 @@ export default function App() {
                         <span key={id} className={'part' + (id === me ? ' me' : '')}>{first(id)} {inr(v)}</span>
                       ))}
                     </div>
+                    {e.rounded && <div className="paidline">incl. ₹1 round-off — the odd paise went to the last head</div>}
                   </div>
                   <div className="stub">
                     <span className="amt">{inr(e.amount)}</span>
-                    <button className="tear" onClick={async () => { await api.remove(e.id); load() }}>tear off</button>
+                                    <button className="tear" onClick={() => askTear(e)}>tear off</button>
                   </div>
                 </article>
               ))}
@@ -352,6 +393,22 @@ export default function App() {
         </>
       )}
 
+      {!picked && !ss && (
+        <div className="gate" role="dialog" aria-label="Who are you">
+          <div className="gatecard">
+            <h1 className="marker-title">who <u>are</u> you?</h1>
+            <p className="hintline">one tap — this phone remembers you after this.</p>
+            <div className="whos">
+              {CREW.map((c) => (
+                <button key={c.id} className="who" aria-pressed={false} onClick={() => pick(c.id)}>
+                  <span className="phiz" style={{ background: c.color }}>{c.tag}</span><br />{first(c.id)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <nav className="nav" aria-label="Spaces">
         {(['home', 'bills', 'wall'] as Verse[]).map((v) => (
           <button key={v} aria-current={verse === v} onClick={() => { setVerse(v); window.scrollTo(0, 0) }}>
@@ -370,19 +427,13 @@ export default function App() {
       {sheet && (
         <>
           <div className="scrim" onClick={() => setSheet(null)} />
-          <div className="sheet" role="dialog" aria-label={sheet === 'expense' ? 'Add a bill' : sheet === 'memory' ? 'Pin a memory' : 'What’s new'}>
+          <div className="sheet" role="dialog" aria-label="Crew dialog">
             {sheet === 'expense' ? (
               <>
                 <h2>new bill on the fridge</h2>
                 <label className="f">what was it<input className="t" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="fuel after chandigarh" maxLength={60} /></label>
-                <div className="row">
-                  <label className="f">how much<input className="t" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1200" /></label>
-                  <label className="f">who paid
-                    <select className="t" value={form.paidBy} onChange={(e) => setForm({ ...form, paidBy: e.target.value })}>
-                      {CREW.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                  </label>
-                </div>
+                <label className="f">how much<input className="t" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1200" /></label>
+                <p className="livecalc">paid by you · {first(me)} — sticking a bill someone else paid? tap their face first</p>
                 <label className="f">who was in on it</label>
                 <div className="whos-tools">
                   <button onClick={() => setForm({ ...form, involved: CREW.map((c) => c.id) })}>all six</button>
@@ -440,7 +491,7 @@ export default function App() {
                   <button className="save" onClick={submitNote}>pin it — {first(me)}</button>
                 </div>
               </>
-            ) : (
+            ) : sheet === 'log' ? (
               <>
                 <h2>what’s new</h2>
                 <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
@@ -467,6 +518,29 @@ export default function App() {
                     </div>
                   </>
                 )}
+              </>
+            ) : sheet === 'confirmTear' ? (
+              <>
+                <h2>tear it off?</h2>
+                <p className="hintline">{pendingTear ? `“${pendingTear.title}” · ${inr(pendingTear.amount)} — gone for everyone, no undo.` : ''}</p>
+                {tearRelated.length > 0 && (
+                  <p className="hintline">{tearRelated.length} payment{tearRelated.length === 1 ? '' : 's'} point{tearRelated.length === 1 ? 's' : ''} at this bill ({tearRelated.map((s) => `${first(s.from)} ₹${Math.round(s.amount)}`).join(', ')}) — take {tearRelated.length === 1 ? 'it' : 'them'} along, or leave {tearRelated.length === 1 ? 'it' : 'them'} standing.</p>
+                )}
+                <div className="saverow">
+                  <button className="cancel" onClick={() => { setPendingTear(null); setTearRelated([]); setSheet(null) }}>keep it</button>
+                  <button className="cancel" onClick={() => confirmTear(false)}>bill only</button>
+                  {tearRelated.length > 0 && <button className="save" onClick={() => confirmTear(true)}>bill + ₹{Math.round(tearRelated.reduce((s, x) => s + x.amount, 0))}</button>}
+                  {tearRelated.length === 0 && <button className="save" onClick={() => confirmTear(false)}>tear it</button>}
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>mark sorted?</h2>
+                <p className="hintline">{pendingSettle ? `${first(pendingSettle.from)} → ${first(pendingSettle.to)} · ${inr(pendingSettle.amount)}` : ''} — tap “yes, paid” only if the money really moved.</p>
+                <div className="saverow">
+                  <button className="cancel" onClick={() => { setPendingSettle(null); setSheet(null) }}>cancel</button>
+                  <button className="save" onClick={confirmSettle}>yes, paid</button>
+                </div>
               </>
             )}
           </div>
