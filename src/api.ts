@@ -10,6 +10,12 @@ export type Expense = {
   createdAt: string
 }
 
+export type LogEntry = {
+  id: number
+  text: string
+  createdAt: string
+}
+
 export type Memory = {
   id: number
   author: string
@@ -61,4 +67,10 @@ export const api = {
     req('/api/v1/push/subscribe', { method: 'POST', body: JSON.stringify(b) }),
   unsub: (endpoint: string) =>
     req('/api/v1/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
+  log: () => req('/api/v1/changelog') as Promise<{ entries: LogEntry[] }>,
+  addLog: (text: string, key?: string) =>
+    req('/api/v1/changelog', { method: 'POST', body: JSON.stringify({ text }), headers: key ? { 'x-dev-key': key } : {} }),
+  upi: () => req('/api/v1/upi') as Promise<{ handles: Record<string, string> }>,
+  setUpi: (crew: string, vpa: string) =>
+    req('/api/v1/upi', { method: 'POST', body: JSON.stringify({ crew, vpa }) }),
 }

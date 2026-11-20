@@ -35,6 +35,34 @@ async function notifyExcept(actor, { title, body }) {
   }))
 }
 const firstName = (id) => ({ shathwik: 'Shathwik', koushik: 'Koushik', deepika: 'Deepika', srinivas: 'Srinivas', rushi: 'Rushi', sonika: 'Sonika' }[id] || id)
+
+// --- Daily digest: one automatic nudge, only if something is pending.
+// Clearly from the app, never from a person. Time is UTC "HH:MM".
+const DIGEST_AT_UTC = process.env.DIGEST_AT_UTC || '15:30'
+function msUntilDigest() {
+  const [hh, mm] = DIGEST_AT_UTC.split(':').map(Number)
+  const now = new Date()
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hh || 0, mm || 0))
+  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1)
+  return next.getTime() - now.getTime()
+}
+async function sendDigest() {
+  try {
+    const { debts } = balances()
+    const subs = PUSH_ON ? db.prepare('SELECT endpoint, keys FROM subscriptions').all() : []
+    if (debts.length && subs.length) {
+      const shown = debts.slice(0, 2).map((d) => `${firstName(d.from)} owes ${firstName(d.to)} ₹${Math.round(d.amount)}`).join(' · ')
+      const more = debts.length > 2 ? ` · +${debts.length - 2} more` : ''
+      const payload = JSON.stringify({ title: `automatic nudge · ${debts.length} to sort`, body: `${shown}${more} — nobody poked you, the app did`, url: '/' })
+      await Promise.all(subs.map(async (s) => {
+        try { await sendNotification({ endpoint: s.endpoint, keys: JSON.parse(s.keys) }, payload) }
+        catch (e) { if (e?.statusCode === 404 || e?.statusCode === 410) db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').run(s.endpoint) }
+      }))
+    }
+  } catch { /* digest never breaks the app */ }
+  scheduleDigest()
+}
+function scheduleDigest() { setTimeout(() => { sendDigest().catch(() => scheduleDigest()) }, msUntilDigest()) }
 const CREW = ['shathwik', 'koushik', 'deepika', 'srinivas', 'rushi', 'sonika']
 
 mkdirSync('data', { recursive: true })
@@ -56,6 +84,11 @@ db.exec(`
     to_id TEXT NOT NULL,
     amount REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS upi_handles (
+    crew TEXT PRIMARY KEY,
+    vpa TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS subscriptions (
     endpoint TEXT PRIMARY KEY,
@@ -153,7 +186,10 @@ app.post('/api/v1/expenses', async (c) => {
 })
 
 app.delete('/api/v1/expenses/:id', (c) => {
-  db.prepare('DELETE FROM expenses WHERE id = ?').run(Number(c.req.param('id')))
+  const id = Number(c.req.param('id'))
+  const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
+  db.prepare('DELETE FROM expenses WHERE id = ?').run(id)
+  if (row) notifyExcept('', { title: `torn off: ${row.title} · ₹${row.amount}`, body: 'tap to see the fridge' }).catch(() => {})
   return c.json({ ok: true })
 })
 
@@ -203,6 +239,22 @@ app.post('/api/v1/settle', async (c) => {
 
 app.get('/api/v1/health', (c) => c.json({ ok: true, crew: 6, module: 'expenses', version: VERSION, build: BUILD, push: PUSH_ON }))
 
+// --- Module: upi (pay-to handles, one per friend) ---
+const VPA_RE = /^[\w.\-]{2,}@[a-zA-Z]{2,}$/
+app.get('/api/v1/upi', (c) => {
+  const rows = db.prepare('SELECT crew, vpa FROM upi_handles').all()
+  return c.json({ handles: Object.fromEntries(rows.map((r) => [r.crew, r.vpa])) })
+})
+
+app.post('/api/v1/upi', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const crew = String(b.crew || '')
+  const vpa = String(b.vpa || '').trim()
+  if (!CREW.includes(crew) || !VPA_RE.test(vpa)) return c.text('bad upi id', 400)
+  db.prepare('INSERT INTO upi_handles (crew, vpa) VALUES (?, ?) ON CONFLICT(crew) DO UPDATE SET vpa = excluded.vpa, updated_at = datetime(\'now\')').run(crew, vpa)
+  return c.json({ ok: true })
+})
+
 // --- Module: push (Web Push subscriptions) ---
 app.get('/api/v1/push/key', (c) => {
   if (!PUSH_ON) return c.text('pings off', 404)
@@ -249,13 +301,54 @@ app.post('/api/v1/memories', async (c) => {
 
 app.patch('/api/v1/memories/:id', async (c) => {
   const b = await c.req.json().catch(() => ({}))
-  db.prepare('UPDATE memories SET done = ? WHERE id = ?').run(b.done ? 1 : 0, Number(c.req.param('id')))
+  const id = Number(c.req.param('id'))
+  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id)
+  db.prepare('UPDATE memories SET done = ? WHERE id = ?').run(b.done ? 1 : 0, id)
+  if (row) {
+    const verb = b.done ? 'crossed off' : 'brought back'
+    notifyExcept('', { title: `${firstName(row.author)} ${verb} “${row.text.slice(0, 60)}”`, body: 'tap to see the go-to list' }).catch(() => {})
+  }
   return c.json({ ok: true })
 })
 
 app.delete('/api/v1/memories/:id', (c) => {
-  db.prepare('DELETE FROM memories WHERE id = ?').run(Number(c.req.param('id')))
+  const id = Number(c.req.param('id'))
+  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id)
+  db.prepare('DELETE FROM memories WHERE id = ?').run(id)
+  if (row) notifyExcept('', { title: `unpinned: “${row.text.slice(0, 60)}”`, body: 'tap to see the go-to list' }).catch(() => {})
   return c.json({ ok: true })
+})
+
+// --- Module: changelog (what's new, crew-writable) ---
+db.exec(`CREATE TABLE IF NOT EXISTS changelog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`)
+if (!db.prepare('SELECT COUNT(*) AS c FROM changelog').get().c) {
+  const ins = db.prepare('INSERT INTO changelog (text) VALUES (?)')
+  for (const t of [
+    'pings are here — switch them on from home and the phone buzzes for bills, sorts and pins',
+    'go-to list: tap a pin to cross it off, crossed ones sink down',
+    'the fridge is personal now — just my bills, with a show-everyone flip',
+    'freshness: the app reloads itself onto every update, no more stale screens',
+    '6–7 splash on launch. tap to open. you know the move.',
+  ]) ins.run(t)
+}
+
+app.get('/api/v1/changelog', (c) => {
+  const rows = db.prepare('SELECT * FROM changelog ORDER BY id DESC LIMIT 50').all()
+  return c.json({ entries: rows.map((r) => ({ id: r.id, text: r.text, createdAt: r.created_at + 'Z' })) })
+})
+
+app.post('/api/v1/changelog', async (c) => {
+  if (!process.env.DEV_KEY || c.req.header('x-dev-key') !== process.env.DEV_KEY) return c.text('dev only', 403)
+  const b = await c.req.json().catch(() => ({}))
+  const text = String(b.text || '').trim().slice(0, 280)
+  if (!text) return c.text('bad entry', 400)
+  const r = db.prepare('INSERT INTO changelog (text) VALUES (?) RETURNING id').get(text)
+  notifyExcept('', { title: 'what’s new in UntilManali', body: text.slice(0, 90) }).catch(() => {})
+  return c.json({ id: r.id })
 })
 
 // --- Static: dist (vite build), held in RAM. Whole app is ~300KB,
@@ -275,17 +368,26 @@ function collect(dir, base = '') {
 }
 try { collect(DIST) } catch { /* run pnpm build first */ }
 const BUILD = createHash('sha256').update(CACHE.get('/index.html')?.body ?? 'missing').digest('hex').slice(0, 12)
+// Cache-bust the icon URLs per deploy so browsers refetch the tab icon.
+{
+  const idx = CACHE.get('/index.html')
+  if (idx) {
+    const v = `?v=${BUILD}`
+    idx.body = Buffer.from(idx.body.toString().replaceAll('/favicon.ico"', `/favicon.ico${v}"`).replaceAll('/fist-192.png"', `/fist-192.png${v}"`))
+  }
+}
 
 app.get('/*', (c) => {
   const key = c.req.path === '/' ? '/index.html' : c.req.path
   const f = CACHE.get(key) || (!key.startsWith('/api/') ? CACHE.get('/index.html') : null)
   if (!f) return c.text('build first: pnpm build', 404)
   c.header('content-type', f.type)
-  const fresh = key === '/index.html' || key === '/sw.js' || key === '/registerSW.js' || key.endsWith('.webmanifest')
+  const fresh = key === '/index.html' || key === '/sw.js' || key === '/registerSW.js' || key === '/favicon.ico' || key.endsWith('.webmanifest')
   c.header('cache-control', fresh ? 'no-cache' : 'public, max-age=31536000, immutable')
   return c.body(f.body)
 })
 
+scheduleDigest()
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`UntilManali on http://localhost:${PORT}`)
 })

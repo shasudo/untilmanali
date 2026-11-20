@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CREW, ME_KEY, crewById } from './crew'
-import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory } from './api'
+import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory, type LogEntry } from './api'
 
 const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
 const WHEEL_R = 124
@@ -17,7 +17,11 @@ export default function App() {
   const [verse, setVerse] = useState<Verse>('home')
   const [mineOnly, setMineOnly] = useState(true)
   const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || 'shathwik')
-  const [sheet, setSheet] = useState<'expense' | 'memory' | null>(null)
+  const [sheet, setSheet] = useState<'expense' | 'memory' | 'log' | null>(null)
+  const [log, setLog] = useState<LogEntry[]>([])
+  const [newLog, setNewLog] = useState('')
+  const [upi, setUpi] = useState<Record<string, string>>({})
+  const [devKey, setDevKey] = useState(() => localStorage.getItem('untilmanali.devkey') || '')
   const [err, setErr] = useState('')
   const [form, setForm] = useState<{ title: string; amount: string; paidBy: string; split: string; involved: string[]; shares: Record<string, string> }>({ title: '', amount: '', paidBy: 'shathwik', split: 'equal', involved: [], shares: {} })
   const [note, setNote] = useState({ text: '', color: WALL_COLORS[0] })
@@ -25,26 +29,32 @@ export default function App() {
   async function load() {
     try {
       setErr('')
-      const [e, b, w] = await Promise.all([api.list(), api.balances(), api.wall()])
-      setExpenses(e.expenses); setBal(b); setWall(w.memories)
+      const [e, b, w, l, u] = await Promise.all([api.list(), api.balances(), api.wall(), api.log(), api.upi()])
+      setExpenses(e.expenses); setBal(b); setWall(w.memories); setLog(l.entries); setUpi(u.handles)
     } catch (e) { setErr(e instanceof Error ? e.message : 'could not reach home base') }
   }
   useEffect(() => { load() }, [])
   useEffect(() => { localStorage.setItem(ME_KEY, me) }, [me])
 
   // Aggressive freshness for 6 people: if the server runs a newer build, take it now.
+  // Retries until the new build actually runs — never pins a tab on stale code.
   useEffect(() => {
     let dead = false
-    ;(async () => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    const check = async () => {
       try {
         const h = await (await fetch('/api/v1/health', { cache: 'no-store' })).json() as { build?: string }
-        if (dead || !h.build || h.build === __BUILD_ID__ || sessionStorage.getItem('um-fresh')) return
-        sessionStorage.setItem('um-fresh', '1')
+        if (dead || !h.build || h.build === __BUILD_ID__ || sessionStorage.getItem('um-fresh') === h.build) return
+        sessionStorage.setItem('um-fresh', h.build)
         try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
         location.reload()
       } catch { /* offline — keep the old copy */ }
-    })()
-    return () => { dead = true }
+    }
+    check()
+    timer = setInterval(check, 60000)
+    const onVis = () => { if (document.visibilityState === 'visible') check() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { dead = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVis) }
   }, [])
 
   const total = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses])
@@ -171,6 +181,28 @@ export default function App() {
     } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
   }
 
+  async function submitLog() {
+    if (!newLog.trim()) { setErr('write the news first'); return }
+    try {
+      await api.addLog(newLog.trim(), devKey || undefined)
+      setNewLog(''); load()
+    } catch (e) {
+      const m = e instanceof Error ? e.message : ''
+      if (m.includes('dev only')) {
+        localStorage.removeItem('untilmanali.devkey'); setDevKey('')
+        setErr('that dev key did not work')
+      } else setErr(m || 'did not stick, try again')
+    }
+  }
+
+  function unlockDev() {
+    const k = window.prompt('dev key:')
+    if (k && k.trim()) { localStorage.setItem('untilmanali.devkey', k.trim()); setDevKey(k.trim()) }
+  }
+
+  const payLink = (to: string, amount: number) =>
+    `upi://pay?pa=${encodeURIComponent(upi[to])}&pn=${encodeURIComponent(first(to))}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent('UntilManali')}`
+
   function openExpense() {
     setForm((f) => ({ ...f, paidBy: me, involved: [] }))
     setSheet('expense')
@@ -220,11 +252,11 @@ export default function App() {
               <button className="jump" onClick={() => setVerse('wall')}>
                 the go-to list <small>{wall.length} pins</small>
               </button>
-              <button className="jump" onClick={togglePush}>
-                pings <small>{pushOn ? `on for ${first(me)}` : pushOk ? 'off — tap to switch on' : 'not on this browser'}</small>
-              </button>
               <button className="jump" onClick={() => setSs(true)}>
                 6–7 <small>certified brainrot</small>
+              </button>
+              <button className="jump" onClick={() => setSheet('log')}>
+                what’s new <small>{log.length} notes</small>
               </button>
             </div>
           </section>
@@ -241,7 +273,10 @@ export default function App() {
               {showDebts.map((d, i) => (
                 <div className="iou" key={i}>
                   <span className="iou-text">{first(d.from)} owes {first(d.to)} <b>{inr(d.amount)}</b></span>
-                  <button className="stampbtn" onClick={async () => { await api.settle(d); load() }}>sorted</button>
+                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto' }}>
+                    {upi[d.to] && <a className="paylink" href={payLink(d.to, d.amount)}>pay</a>}
+                    <button className="stampbtn" onClick={async () => { await api.settle(d); load() }}>sorted</button>
+                  </span>
                 </div>
               ))}
             </div>
@@ -335,7 +370,7 @@ export default function App() {
       {sheet && (
         <>
           <div className="scrim" onClick={() => setSheet(null)} />
-          <div className="sheet" role="dialog" aria-label={sheet === 'expense' ? 'Add a bill' : 'Pin a memory'}>
+          <div className="sheet" role="dialog" aria-label={sheet === 'expense' ? 'Add a bill' : sheet === 'memory' ? 'Pin a memory' : 'What’s new'}>
             {sheet === 'expense' ? (
               <>
                 <h2>new bill on the fridge</h2>
@@ -390,7 +425,7 @@ export default function App() {
                   <button className="save" onClick={submitExpense}>stick it up</button>
                 </div>
               </>
-            ) : (
+            ) : sheet === 'memory' ? (
               <>
                 <h2>pin it before you forget</h2>
                 <label className="f">the memory<textarea className="t" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} placeholder="rushi tried to pay with exact change again…" maxLength={280} /></label>
@@ -404,6 +439,34 @@ export default function App() {
                   <button className="cancel" onClick={() => setSheet(null)}>nah</button>
                   <button className="save" onClick={submitNote}>pin it — {first(me)}</button>
                 </div>
+              </>
+            ) : (
+              <>
+                <h2>what’s new</h2>
+                <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                  {log.length === 0 && <div className="empty">nothing yet. history starts here.</div>}
+                  {log.map((e) => (
+                    <div className="logrow" key={e.id}>{e.text}<small>{new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</small></div>
+                  ))}
+                </div>
+                {devKey ? (
+                  <>
+                    <label className="f">add a line<textarea className="t" value={newLog} onChange={(e) => setNewLog(e.target.value)} placeholder="pings now buzz for crossed-off go-tos…" maxLength={280} /></label>
+                    <div className="saverow">
+                      <button className="cancel" onClick={() => setSheet(null)}>close</button>
+                      <button className="save" onClick={submitLog}>post it</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="whos-tools">
+                      <button onClick={unlockDev}>dev? add news</button>
+                    </div>
+                    <div className="saverow">
+                      <button className="cancel" onClick={() => setSheet(null)}>close</button>
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>

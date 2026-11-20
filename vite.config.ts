@@ -10,7 +10,7 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      includeAssets: ['icon.svg', 'mask-icon.svg', 'fist-192.png', 'fist-512.png', 'fist-maskable-512.png'],
+      includeAssets: ['favicon.ico', 'fist-192.png', 'fist-512.png', 'fist-maskable-512.png'],
       manifest: {
         name: 'UntilManali — Crew OS',
         short_name: 'UntilManali',

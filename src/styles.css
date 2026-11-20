@@ -45,6 +45,10 @@ body { background: var(--ink); color: var(--paper); font-family: var(--font); -w
   display: grid; place-items: center; font-family: var(--mono); font-weight: 700; font-size: 12px;
   color: #14120d; border: 2px solid var(--ink); flex: 0 0 auto; }
 .addnote { display: inline-block; width: 100%; margin-bottom: 12px; }
+.logrow { background: var(--paper2); color: var(--ink); border: 2px solid var(--ink);
+  border-radius: 4px 12px 4px 12px; padding: 10px 12px; font-family: var(--mono);
+  font-size: 12.5px; box-shadow: 2px 2px 0 #000; overflow-wrap: anywhere; }
+.logrow small { display: block; opacity: .6; margin-top: 4px; font-size: 10.5px; }
 
 /* IOUs, not invoices. */
 .ious { display: grid; gap: 10px; margin: 14px 0 20px; }
@@ -57,6 +61,10 @@ body { background: var(--ink); color: var(--paper); font-family: var(--font); -w
 .iou:nth-child(even) { transform: rotate(.6deg); border-radius: 12px 3px 12px 3px; }
 .iou-text { font-family: var(--hand); font-size: 17px; }
 .iou-text b { background: var(--acid); padding: 0 6px; border: 1.5px solid var(--ink); }
+.paylink { flex: 0 0 auto; font-family: var(--hand); font-size: 17px; font-weight: 700; color: #14120d;
+  background: var(--acid); border: 2px solid var(--ink); border-radius: 999px; padding: 7px 15px;
+  transform: rotate(-2deg); box-shadow: 2px 2px 0 #000; text-decoration: none; }
+.paylink:active { transform: rotate(-2deg) translate(2px, 2px); box-shadow: none; }
 .stampbtn {
   flex: 0 0 auto; cursor: pointer; font-family: var(--hand); font-size: 16px; font-weight: 700;
   color: var(--paper); background: var(--ember); border: 2px solid var(--ink); border-radius: 999px;

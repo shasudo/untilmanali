@@ -33,6 +33,7 @@ personal — "you owe / you get back" — follows that chip.
 
 - The fridge opens on **your** bills only — pick your face on the wheel and that's your world.
 - **show everyone** flips to the full crew view when you're curious.
+- Owe someone? Tap **pay** on the line — it opens GPay/PhonePe with their UPI ID and the exact amount filled in. Then tap **sorted**.
 - Each ticket shows who paid, who owes what, and the total stub.
 - Your own share is highlighted lime.
 - Wrong ticket? **tear off** deletes it for everyone. Re-stick it right.
@@ -47,13 +48,18 @@ The line disappears. Settle fast — that's the whole rule.
 
 **+ pin a go-to…** sticks a note for everyone. Tap a pin to cross it off, tap again to bring it back:
 
+## What’s new
+
+The **what’s new** jump on home is the changelog — everything the app learned to do, newest first. Only the dev can post lines (dev key), and the whole crew gets pinged about each one.
+
 ## Pings (notifications)
 
-1. On home, tap the **pings** jump, then **allow**.
+1. On launch a card asks to switch pings on — tap **switch on**, then **allow**.
 2. Your phone now buzzes when anyone else sticks a bill, sorts one, or pins a go-to — even with the app closed.
 3. Switching faces re-points pings automatically. Tap pings again to switch off.
 4. iPhone needs the installed home-screen app (iOS 16.4+). Android just works.
 5. If it says the ping service is unreachable, check internet, pause any adblocker, and tap again — desktop browsers are the fussy ones, phones almost always go through first try.
+6. Every evening there's one automatic nudge if anything is still unsettled — it says so right in the message, so nobody thinks a friend is nagging.
  Florists of the trip, running jokes, "rushi paid, miracles happen".
 Tap × on a note to unpin it. The wall is forever, the bills are not.
 
