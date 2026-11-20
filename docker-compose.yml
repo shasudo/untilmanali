@@ -1,0 +1,10 @@
+services:
+  untilmanali:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+    volumes:
+      - ./data:/app/data

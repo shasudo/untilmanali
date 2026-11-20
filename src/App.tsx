@@ -1,0 +1,414 @@
+import { useEffect, useMemo, useState } from 'react'
+import { CREW, ME_KEY, crewById } from './crew'
+import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory } from './api'
+
+const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
+const WHEEL_R = 124
+
+const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+const first = (id: string) => crewById(id).name.split(' ')[0]
+
+type Verse = 'home' | 'bills' | 'wall'
+
+export default function App() {
+  const [expenses, setExpenses] = useState<Expense[]>([])
+  const [bal, setBal] = useState<Balances | null>(null)
+  const [wall, setWall] = useState<Memory[]>([])
+  const [verse, setVerse] = useState<Verse>('home')
+  const [mineOnly, setMineOnly] = useState(true)
+  const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || 'shathwik')
+  const [sheet, setSheet] = useState<'expense' | 'memory' | null>(null)
+  const [err, setErr] = useState('')
+  const [form, setForm] = useState<{ title: string; amount: string; paidBy: string; split: string; involved: string[]; shares: Record<string, string> }>({ title: '', amount: '', paidBy: 'shathwik', split: 'equal', involved: [], shares: {} })
+  const [note, setNote] = useState({ text: '', color: WALL_COLORS[0] })
+
+  async function load() {
+    try {
+      setErr('')
+      const [e, b, w] = await Promise.all([api.list(), api.balances(), api.wall()])
+      setExpenses(e.expenses); setBal(b); setWall(w.memories)
+    } catch (e) { setErr(e instanceof Error ? e.message : 'could not reach home base') }
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => { localStorage.setItem(ME_KEY, me) }, [me])
+
+  // Aggressive freshness for 6 people: if the server runs a newer build, take it now.
+  useEffect(() => {
+    let dead = false
+    ;(async () => {
+      try {
+        const h = await (await fetch('/api/v1/health', { cache: 'no-store' })).json() as { build?: string }
+        if (dead || !h.build || h.build === __BUILD_ID__ || sessionStorage.getItem('um-fresh')) return
+        sessionStorage.setItem('um-fresh', '1')
+        try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
+        location.reload()
+      } catch { /* offline — keep the old copy */ }
+    })()
+    return () => { dead = true }
+  }, [])
+
+  const total = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses])
+  const myNet = bal?.net?.[me] ?? 0
+  const debts = bal?.debts ?? []
+  const myExpenses = useMemo(() => expenses.filter((e) => e.involved.includes(me) || e.paidBy === me), [expenses, me])
+  const myDebts = useMemo(() => debts.filter((d) => d.from === me || d.to === me), [debts, me])
+  const showExpenses = mineOnly ? myExpenses : expenses
+  const showDebts = mineOnly ? myDebts : debts
+  const amt = Math.round(Number(form.amount) * 100) / 100 || 0
+  const sumShares = Object.values(form.shares).reduce((s, v) => s + (Number(v) || 0), 0)
+
+  const [zap, setZap] = useState({ id: '', n: 0 })
+  const [ss, setSs] = useState(true)
+  const [pingAsk, setPingAsk] = useState(false)
+  const [pushOn, setPushOn] = useState(() => localStorage.getItem('untilmanali.push') === '1')
+  const pushOk = typeof window !== 'undefined' && 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator
+  function pick(id: string) {
+    setMe(id)
+    setForm((f) => ({ ...f, paidBy: id }))
+    setZap((z) => ({ id, n: z.n + 1 }))
+  }
+
+  async function freshSub(): Promise<PushSubscription> {
+    const keyJson = await api.pushKey().catch(() => null)
+    if (!keyJson?.key) throw new Error('pings are not switched on, on this server yet')
+    const reg = await navigator.serviceWorker.ready
+    return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(keyJson.key) })
+  }
+
+  function friendlyPushErr(e: unknown): string {
+    const msg = e instanceof Error ? e.message : 'pings failed to switch on'
+    if (/push service/i.test(msg)) return 'ping service unreachable — check internet, pause any adblocker, tap again'
+    if (/denied|not allowed|permission/i.test(msg)) return 'pings blocked — allow them in the browser settings, then tap again'
+    if (/permission dismissed|dismiss/i.test(msg)) return 'you dismissed the ask — tap pings again to retry'
+    return msg
+  }
+
+  async function togglePush() {
+    try {
+      if (!pushOk) { setErr('pings need a modern phone browser'); return }
+      if (pushOn) {
+        const reg = await navigator.serviceWorker.ready
+        const sub = await reg.pushManager.getSubscription()
+        if (sub) {
+          try { await sub.unsubscribe() } catch { /* already gone */ }
+          try { await api.unsub(sub.endpoint) } catch { /* server already forgot */ }
+        }
+        localStorage.removeItem('untilmanali.push')
+        setPushOn(false)
+        return
+      }
+      if (Notification.requestPermission && (await Notification.requestPermission()) !== 'granted') {
+        setErr('pings blocked — allow them in the browser settings, then tap again')
+        return
+      }
+      let sub: PushSubscription
+      try {
+        sub = await freshSub()
+      } catch {
+        // Stale browser-side subscription (e.g. made for older keys) — drop it, try once more.
+        const reg = await navigator.serviceWorker.ready
+        const old = await reg.pushManager.getSubscription().catch(() => null)
+        if (old) {
+          try { await old.unsubscribe() } catch { /* gone */ }
+          try { await api.unsub(old.endpoint) } catch { /* gone */ }
+        }
+        sub = await freshSub()
+      }
+      await api.sub({ subscription: sub.toJSON(), crew: me })
+      localStorage.setItem('untilmanali.push', '1')
+      setPushOn(true)
+    } catch (e) { setErr(friendlyPushErr(e)) }
+  }
+
+  // One friendly ask per launch: pings on, once the splash is gone.
+  useEffect(() => {
+    if (verse === 'home' && !ss && !pushOn && pushOk
+      && typeof Notification !== 'undefined' && Notification.permission === 'default'
+      && !sessionStorage.getItem('um-ping-asked')) {
+      setPingAsk(true)
+    }
+  }, [verse, ss, pushOn, pushOk])
+
+  // Keep the server's copy of this phone pointed at whoever is picked.
+  useEffect(() => {
+    if (!pushOn || !pushOk) return
+    navigator.serviceWorker.ready.then(async (reg) => {
+      const sub = await reg.pushManager.getSubscription()
+      if (sub) api.sub({ subscription: sub.toJSON(), crew: me }).catch(() => {})
+    }).catch(() => {})
+  }, [me, pushOn])
+
+  function toggleInvolved(id: string) {
+    setForm((f) => {
+      const has = f.involved.includes(id)
+      return { ...f, involved: has ? f.involved.filter((x) => x !== id) : [...f.involved, id] }
+    })
+  }
+
+  async function submitExpense() {
+    if (!form.title.trim() || !(amt > 0)) { setErr('give it a name and a number, even a rough one'); return }
+    if (!form.involved.length) { setErr("tap who's in — even one counts"); return }
+    const shares: Record<string, number> = {}
+    if (form.split !== 'equal') {
+      for (const id of form.involved) shares[id] = Number(form.shares[id] || 0)
+      const sum = Object.values(shares).reduce((a, b) => a + b, 0)
+      const need = form.split === 'percent' ? 100 : amt
+      const unit = form.split === 'percent' ? '%' : '₹'
+      if (Math.abs(sum - need) > 0.01) { setErr(`those bits add to ${unit}${sum}, need ${unit}${need}`); return }
+    }
+    try {
+      await api.add({ title: form.title.trim(), amount: amt, paidBy: form.paidBy, split: form.split, involved: form.involved, shares })
+      setForm({ title: '', amount: '', paidBy: me, split: 'equal', involved: [], shares: {} })
+      setSheet(null); load()
+    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+  }
+
+  async function submitNote() {
+    if (!note.text.trim()) { setErr('write something first, even one line'); return }
+    try {
+      await api.pin({ author: me, text: note.text.trim(), color: note.color })
+      setNote({ text: '', color: WALL_COLORS[0] }); setSheet(null); load()
+    } catch (e) { setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+  }
+
+  function openExpense() {
+    setForm((f) => ({ ...f, paidBy: me, involved: [] }))
+    setSheet('expense')
+  }
+
+  return (
+    <>
+      <div className="wall" aria-hidden />
+      <div className="wrap">
+        {verse === 'home' && (
+          <section className="verse" key="home">
+            <header className="crewhead">
+              <h1 className="marker-title">until <u>manali</u></h1>
+              <div className="lefthint">
+                <span className="hintline">the crew wheel. tap yourself, then go spend.</span>
+              </div>
+            </header>
+
+            <div className="wheel" role="group" aria-label="Who are you?">
+              {CREW.map((c, i) => {
+                const a = i * (360 / CREW.length) - 90
+                const live = zap.id === c.id
+                return (
+                  <span key={live ? c.id + zap.n : c.id} className="spoke" style={{ transform: `rotate(${a}deg) translate(${WHEEL_R}px) rotate(${-a}deg)` }}>
+                    <button className={'orb' + (live ? ' zap' : '')} aria-pressed={me === c.id} onClick={() => pick(c.id)}>
+                      <span className="otag">{c.tag}</span>
+                      <span className="oname">{first(c.id)}</span>
+                    </button>
+                  </span>
+                )
+              })}
+              <div key={'h' + zap.n} className={'hub' + (zap.n ? ' bump' : '')}>
+                <small>{first(me)} · {inr(total)}</small>
+                <b>{myNet === 0 ? 'even steven' : myNet > 0 ? `gets ${inr(myNet)}` : `owes ${inr(-myNet)}`}</b>
+              </div>
+            </div>
+
+            <div className="jumps">
+              <button className="jump" onClick={() => setVerse('bills')}>
+                open my fridge <small>{myExpenses.length} with my name · {inr(total)} in pot</small>
+              </button>
+              {myDebts.length > 0 && (
+                <button className="jump" onClick={() => setVerse('bills')}>
+                  sorting out <small>{myDebts.length} of mine to sort</small>
+                </button>
+              )}
+              <button className="jump" onClick={() => setVerse('wall')}>
+                the go-to list <small>{wall.length} pins</small>
+              </button>
+              <button className="jump" onClick={togglePush}>
+                pings <small>{pushOn ? `on for ${first(me)}` : pushOk ? 'off — tap to switch on' : 'not on this browser'}</small>
+              </button>
+              <button className="jump" onClick={() => setSs(true)}>
+                6–7 <small>certified brainrot</small>
+              </button>
+            </div>
+          </section>
+        )}
+
+        {verse === 'bills' && (
+          <section className="verse" key="bills">
+            <h2 className="seclabel">{mineOnly ? `${first(me)}'s fridge` : 'the whole fridge'}</h2>
+            <div className="whos-tools">
+              <button onClick={() => setMineOnly(!mineOnly)}>{mineOnly ? 'show everyone' : 'just mine'}</button>
+            </div>
+            <div className="ious">
+              {showDebts.length === 0 && <div className="empty">{mineOnly ? 'you owe nobody, nobody owes you. clean.' : 'nobody owes anybody. suspiciously peaceful.'}</div>}
+              {showDebts.map((d, i) => (
+                <div className="iou" key={i}>
+                  <span className="iou-text">{first(d.from)} owes {first(d.to)} <b>{inr(d.amount)}</b></span>
+                  <button className="stampbtn" onClick={async () => { await api.settle(d); load() }}>sorted</button>
+                </div>
+              ))}
+            </div>
+            <section className="feed">
+              {showExpenses.length === 0 && <div className="empty">{mineOnly ? 'nothing with your name on it. go make a memory.' : 'nothing here yet. first chai, first fuel — someone\'s buying.'}</div>}
+              {showExpenses.map((e) => (
+                <article className="stub-ticket" key={e.id}>
+                  <div className="main">
+                    <h3>{e.title}</h3>
+                    <div className="paidline">
+                      <span className="paidstamp" style={{ background: crewById(e.paidBy).color }}>{first(e.paidBy)} paid</span>
+                      {e.split === 'equal' ? `split ${e.involved.length === 6 ? 'between everyone' : 'between ' + e.involved.map(first).join(', ')}`
+                        : e.split === 'percent' ? 'by percent' : 'exact bits'} · {new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                    </div>
+                    <div className="parts">
+                      {Object.entries(e.breakdown).filter(([, v]) => v > 0).map(([id, v]) => (
+                        <span key={id} className={'part' + (id === me ? ' me' : '')}>{first(id)} {inr(v)}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="stub">
+                    <span className="amt">{inr(e.amount)}</span>
+                    <button className="tear" onClick={async () => { await api.remove(e.id); load() }}>tear off</button>
+                  </div>
+                </article>
+              ))}
+            </section>
+          </section>
+        )}
+
+        {verse === 'wall' && (
+          <section className="verse" key="wall">
+            <h2 className="seclabel">the go-to list · {wall.filter((m) => !m.done).length} to go</h2>
+            <section className="notes">
+              {wall.map((m) => (
+                <div className={'note' + (m.done ? ' done' : '')} key={m.id} style={{ background: m.color }}
+                  title={m.done ? 'tap to uncross' : 'tap to cross off'}
+                  onClick={async () => { await api.cross(m.id, !m.done); load() }}>
+                  <button className="x" aria-label="unpin" onClick={async (e) => { e.stopPropagation(); await api.unpin(m.id); load() }}>×</button>
+                  <span className="notetext">{m.text}</span>
+                  <small>— {first(m.author)}</small>
+                </div>
+              ))}
+              <button className="addnote" onClick={() => setSheet('memory')}>+ pin a go-to…</button>
+            </section>
+            {wall.length === 0 && <p className="hintline" style={{ marginTop: 8 }}>first one writes itself: where were you when this pot started?</p>}
+          </section>
+        )}
+
+        {err && <div><span className="errtape">{err}</span></div>}
+      </div>
+
+      {ss && (
+        <div className="ss" role="button" aria-label="six seven — tap to stop" onClick={() => setSs(false)}>
+          <div className="ss-word"><span style={{ color: '#d8ff3e' }}>SIX</span><span style={{ color: '#ff5c1f' }}>SEVEN</span></div>
+          <div className="ss-plank"><span className="ss-puck l">6</span><span className="ss-puck r">7</span></div>
+          <div className="ss-base" />
+          <p className="hintline">both palms up. you know the move. tap to open.</p>
+        </div>
+      )}
+
+      {pingAsk && !pushOn && (
+        <>
+          <div className="scrim" style={{ zIndex: 39 }} onClick={() => { sessionStorage.setItem('um-ping-asked', '1'); setPingAsk(false) }} />
+          <div className="pop" role="dialog" aria-label="Switch pings on">
+            <h2>hear the fridge buzz?</h2>
+            <p>switch pings on and your phone shouts when anyone sticks a bill, sorts one, or pins a go-to.</p>
+            <div className="saverow">
+              <button className="cancel" onClick={() => { sessionStorage.setItem('um-ping-asked', '1'); setPingAsk(false) }}>later</button>
+              <button className="save" onClick={async () => { await togglePush(); setPingAsk(false) }}>switch on</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      <nav className="nav" aria-label="Spaces">
+        {(['home', 'bills', 'wall'] as Verse[]).map((v) => (
+          <button key={v} aria-current={verse === v} onClick={() => { setVerse(v); window.scrollTo(0, 0) }}>
+            {v === 'home' ? 'home' : v === 'bills' ? 'fridge' : 'go-tos'}
+          </button>
+        ))}
+      </nav>
+
+      {verse === 'bills' && !sheet && (
+        <button className="fab-round" aria-label="Stick a new bill" onClick={openExpense}>+</button>
+      )}
+      {verse === 'wall' && !sheet && (
+        <button className="fab-round" aria-label="Pin a memory" onClick={() => setSheet('memory')}>+</button>
+      )}
+
+      {sheet && (
+        <>
+          <div className="scrim" onClick={() => setSheet(null)} />
+          <div className="sheet" role="dialog" aria-label={sheet === 'expense' ? 'Add a bill' : 'Pin a memory'}>
+            {sheet === 'expense' ? (
+              <>
+                <h2>new bill on the fridge</h2>
+                <label className="f">what was it<input className="t" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="fuel after chandigarh" maxLength={60} /></label>
+                <div className="row">
+                  <label className="f">how much<input className="t" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1200" /></label>
+                  <label className="f">who paid
+                    <select className="t" value={form.paidBy} onChange={(e) => setForm({ ...form, paidBy: e.target.value })}>
+                      {CREW.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <label className="f">who was in on it</label>
+                <div className="whos-tools">
+                  <button onClick={() => setForm({ ...form, involved: CREW.map((c) => c.id) })}>all six</button>
+                  <button onClick={() => setForm({ ...form, involved: [] })}>clear</button>
+                </div>
+                <div className="whos">
+                  {CREW.map((c) => (
+                    <button key={c.id} className="who" aria-pressed={form.involved.includes(c.id)} onClick={() => toggleInvolved(c.id)}>
+                      <span className="phiz" style={{ background: c.color }}>{c.tag}</span><br />{first(c.id)}
+                    </button>
+                  ))}
+                </div>
+                <div className="seg">
+                  {(['equal', 'custom', 'percent'] as const).map((s) => (
+                    <button key={s} aria-pressed={form.split === s} onClick={() => setForm({ ...form, split: s })}>
+                      {s === 'equal' ? 'even steven' : s === 'custom' ? 'exact ₹' : 'by %'}
+                    </button>
+                  ))}
+                </div>
+                {form.split !== 'equal' && (
+                  <div className="shares">
+                    {form.involved.map((id) => (
+                      <label key={id}>{first(id)} {form.split === 'percent' ? '%' : '₹'}
+                        <input inputMode="decimal" value={form.shares[id] || ''} placeholder="0"
+                          onChange={(e) => setForm({ ...form, shares: { ...form.shares, [id]: e.target.value } })} />
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {form.split === 'equal' && amt > 0 && (
+                  form.involved.length
+                    ? <p className="livecalc">≈ {inr(Math.round(amt / form.involved.length))} each for the {form.involved.length} of you in on it</p>
+                    : <p className="livecalc">tap who's in first, then watch the math</p>
+                )}
+                {form.split !== 'equal' && (
+                  <p className="livecalc">bits so far: {form.split === 'percent' ? `${sumShares}% of 100%` : `${inr(sumShares)} of ${inr(amt)}`}</p>
+                )}
+                <div className="saverow">
+                  <button className="cancel" onClick={() => setSheet(null)}>nah</button>
+                  <button className="save" onClick={submitExpense}>stick it up</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>pin it before you forget</h2>
+                <label className="f">the memory<textarea className="t" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} placeholder="rushi tried to pay with exact change again…" maxLength={280} /></label>
+                <label className="f">pick a sticky</label>
+                <div className="swatches">
+                  {WALL_COLORS.map((c) => (
+                    <button key={c} aria-pressed={note.color === c} style={{ background: c }} aria-label={c} onClick={() => setNote({ ...note, color: c })} />
+                  ))}
+                </div>
+                <div className="saverow">
+                  <button className="cancel" onClick={() => setSheet(null)}>nah</button>
+                  <button className="save" onClick={submitNote}>pin it — {first(me)}</button>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  )
+}

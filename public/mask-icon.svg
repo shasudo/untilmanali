@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" fill="#14120d"/>
+  <g transform="translate(20 22) scale(0.6875)">
+    <circle cx="88" cy="40" r="15" fill="#ff5c1f"/>
+    <path d="M10 98 L48 42 L66 66 L80 50 L118 98 Z" fill="#f4efe2"/>
+    <path d="M48 42 L57 54 L51 59 L45 54 L40 57 L36 51 Z" fill="#d8ff3e"/>
+    <path d="M62 98 L70 80 L74 80 L70 98 Z" fill="#14120d"/>
+    <g transform="rotate(-8 64 18)">
+      <rect x="30" y="9" width="68" height="17" fill="#d8ff3e" opacity=".9"/>
+    </g>
+    <g>
+      <circle cx="26" cy="112" r="4.5" fill="#d8ff3e"/>
+      <circle cx="42" cy="112" r="4.5" fill="#ff5c1f"/>
+      <circle cx="58" cy="112" r="4.5" fill="#7ef0c1"/>
+      <circle cx="74" cy="112" r="4.5" fill="#ffd23e"/>
+      <circle cx="90" cy="112" r="4.5" fill="#ff7ab8"/>
+      <circle cx="106" cy="112" r="4.5" fill="#8ec5ff"/>
+    </g>
+  </g>
+</svg>
