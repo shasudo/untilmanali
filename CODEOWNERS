@@ -1,0 +1,2 @@
+# Only @shasudo can approve merges to protected branches.
+* @shasudo
