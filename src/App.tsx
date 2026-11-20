@@ -1,25 +1,63 @@
+// UntilManali — composition root. Owns data, verse + sheet navigation, and
+// the outcomes (settle/tear/pick). Verses and sheets own their own drafts,
+// so typing in a sheet never re-renders the world behind it.
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CREW, ME_KEY, crewById } from './crew'
-import { api, urlBase64ToUint8Array, type Expense, type Balances, type Memory, type LogEntry, type Settle } from './api'
+import { ME_KEY } from './crew'
+import { api, type Balances, type Expense, type LogEntry, type Memory, type Settle } from './api'
 import { buzz } from './feel'
+import { first, inr, pathFor, verseFromLocation, type Verse } from './lib/format'
+import { useFreshness } from './hooks/useFreshness'
+import { pushOk, usePush } from './hooks/usePush'
+import HomeVerse from './components/HomeVerse'
+import BillsVerse, { type DebtLine } from './components/BillsVerse'
+import WallVerse from './components/WallVerse'
+import Splash from './components/Splash'
+import Gate from './components/Gate'
+import PingAsk from './components/PingAsk'
+import ExpenseSheet from './components/sheets/ExpenseSheet'
+import MemorySheet from './components/sheets/MemorySheet'
+import LogSheet from './components/sheets/LogSheet'
+import { ConfirmSettleSheet, ConfirmTearSheet } from './components/sheets/ConfirmSheets'
 
-const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
-const WHEEL_R = 124
-
-const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 0 })
-const first = (id: string) => crewById(id).name.split(' ')[0]
-
-type Verse = 'home' | 'bills' | 'wall'
 type Sheet = 'expense' | 'memory' | 'log' | 'confirmSettle' | 'confirmTear' | null
 
 export default function App() {
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [bal, setBal] = useState<Balances | null>(null)
   const [wall, setWall] = useState<Memory[]>([])
-  const pathFor = (v: Verse) => (v === 'home' ? '/' : v === 'bills' ? '/fridge' : '/go-tos')
-  const verseFor = (p: string): Verse => (p === 'fridge' ? 'bills' : p === 'go-tos' ? 'wall' : 'home')
-  const [verse, setVerse] = useState<Verse>(() => verseFor(window.location.pathname.replace(/^\//, '')))
+  const [log, setLog] = useState<LogEntry[]>([])
+  const [upi, setUpi] = useState<Record<string, string>>({})
+  const [verse, setVerse] = useState<Verse>(verseFromLocation)
   const [sheet, setSheet] = useState<Sheet>(null)
+  const [mineOnly, setMineOnly] = useState(true)
+  const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || '')
+  const [picked, setPicked] = useState(() => !!localStorage.getItem(ME_KEY))
+  const [pendingSettle, setPendingSettle] = useState<DebtLine | null>(null)
+  const [pendingTear, setPendingTear] = useState<Expense | null>(null)
+  const [tearRelated, setTearRelated] = useState<Settle[]>([])
+  const [err, setErr] = useState('')
+  const [flash, setFlash] = useState('')
+  const [ss, setSs] = useState(() => {
+    try {
+      const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+      return !nav || nav.type === 'navigate'
+    } catch { return true }
+  })
+  const [pingAsk, setPingAsk] = useState(false)
+
+  async function load(silent = false) {
+    try {
+      if (!silent) setErr('')
+      const [e, b, w, l, u] = await Promise.all([api.list(), api.balances(), api.wall(), api.log(), api.upi()])
+      setExpenses(e.expenses); setBal(b); setWall(w.memories); setLog(l.entries); setUpi(u.handles)
+    } catch (e) { if (!silent) setErr(e instanceof Error ? e.message : 'could not reach home base') }
+  }
+  useEffect(() => { load() }, [])
+  useFreshness(load)
+  const { pushOn, togglePush } = usePush(me, setErr)
+
+  // Verse + sheet navigation. A sheet pushes one #dlg entry, so the back
+  // button closes the sheet first instead of leaving the verse.
   function go(v: Verse) {
     setVerse(v)
     window.scrollTo(0, 0)
@@ -48,95 +86,12 @@ export default function App() {
         setSheet(null)
         return
       }
-      setVerse(verseFor(window.location.pathname.replace(/^\//, '')))
+      setVerse(verseFromLocation())
       window.scrollTo(0, 0)
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
-  const [mineOnly, setMineOnly] = useState(true)
-  const [me, setMe] = useState(() => localStorage.getItem(ME_KEY) || '')
-  const [picked, setPicked] = useState(() => !!localStorage.getItem(ME_KEY))
-  const [pendingSettle, setPendingSettle] = useState<{ from: string; to: string; amount: number } | null>(null)
-  const [flash, setFlash] = useState('')
-  const [pendingTear, setPendingTear] = useState<Expense | null>(null)
-  const [tearRelated, setTearRelated] = useState<Settle[]>([])
-  const [log, setLog] = useState<LogEntry[]>([])
-  const [newLog, setNewLog] = useState('')
-  const [upi, setUpi] = useState<Record<string, string>>({})
-  const [devKey, setDevKey] = useState(() => localStorage.getItem('untilmanali.devkey') || '')
-  const [err, setErr] = useState('')
-  const [form, setForm] = useState<{ title: string; amount: string; split: string; involved: string[]; shares: Record<string, string> }>({ title: '', amount: '', split: 'equal', involved: [], shares: {} })
-  const [note, setNote] = useState({ text: '', color: WALL_COLORS[0] })
-
-  async function load(silent = false) {
-    try {
-      if (!silent) setErr('')
-      const [e, b, w, l, u] = await Promise.all([api.list(), api.balances(), api.wall(), api.log(), api.upi()])
-      setExpenses(e.expenses); setBal(b); setWall(w.memories); setLog(l.entries); setUpi(u.handles)
-    } catch (e) { if (!silent) setErr(e instanceof Error ? e.message : 'could not reach home base') }
-  }
-  useEffect(() => { load() }, [])
-  useEffect(() => { if (me) localStorage.setItem(ME_KEY, me) }, [me])
-
-  // Aggressive freshness for 6 people: a genuinely newer build reloads once
-  // onto it; otherwise just re-pull the data — an open tab must never go stale.
-  // First sighting in a tab never reloads (a reload there would kill the splash).
-  useEffect(() => {
-    let dead = false
-    let timer: ReturnType<typeof setInterval> | undefined
-    const check = async (refreshData = true) => {
-      try {
-        const h = await (await fetch('/api/v1/health', { cache: 'no-store' })).json() as { build?: string }
-        if (dead || !h.build) return
-        const seen = sessionStorage.getItem('um-fresh')
-        if (seen && seen !== h.build) {
-          sessionStorage.setItem('um-fresh', h.build)
-          try { await navigator.serviceWorker?.getRegistration?.().then((r) => r?.update()) } catch { /* old worker stays */ }
-          location.reload()
-          return
-        }
-        if (!seen) sessionStorage.setItem('um-fresh', h.build)
-        if (refreshData && !dead) await load(true)
-      } catch { /* offline — keep the old copy */ }
-    }
-    check(false)
-    timer = setInterval(() => check(true), 60000)
-    const onVis = () => { if (document.visibilityState === 'visible') check(true) }
-    const onFocus = () => check(true)
-    document.addEventListener('visibilitychange', onVis)
-    window.addEventListener('focus', onFocus)
-    return () => { dead = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onFocus) }
-  }, [])
-
-  const total = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses])
-  const myNet = bal?.net?.[me] ?? 0
-  const debts = bal?.debts ?? []
-  const myExpenses = useMemo(() => expenses.filter((e) => e.involved.includes(me) || e.paidBy === me), [expenses, me])
-  const myDebts = useMemo(() => debts.filter((d) => d.from === me || d.to === me), [debts, me])
-  const showExpenses = mineOnly ? myExpenses : expenses
-  const showDebts = mineOnly ? myDebts : debts
-  const amt = Math.round(Number(form.amount) * 100) / 100 || 0
-  const sumShares = Object.values(form.shares).reduce((s, v) => s + (Number(v) || 0), 0)
-
-  const [zap, setZap] = useState({ id: '', n: 0 })
-  const [ss, setSs] = useState(() => {
-    try {
-      const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
-      return !nav || nav.type === 'navigate'
-    } catch { return true }
-  })
-  const [pingAsk, setPingAsk] = useState(false)
-  const [pushOn, setPushOn] = useState(() => localStorage.getItem('untilmanali.push') === '1')
-  const pushOk = typeof window !== 'undefined' && 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator
-  const pushBlocked = typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'denied'
-  function pick(id: string) {
-    buzz('select')
-    setMe(id)
-    localStorage.setItem(ME_KEY, id)
-    setPicked(true)
-    setZap((z) => ({ id, n: z.n + 1 }))
-  }
 
   // One light tap for every touchable thing; bigger moments buzz on their own.
   useEffect(() => {
@@ -147,114 +102,29 @@ export default function App() {
     return () => document.removeEventListener('pointerdown', onTouch)
   }, [])
 
-  async function freshSub(): Promise<PushSubscription> {
-    const keyJson = await api.pushKey().catch(() => null)
-    if (!keyJson?.key) throw new Error('pings are not switched on, on this server yet')
-    const reg = await navigator.serviceWorker.ready
-    return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(keyJson.key) })
-  }
-
-  function friendlyPushErr(e: unknown): string {
-    const msg = e instanceof Error ? e.message : 'pings failed to switch on'
-    if (/push service/i.test(msg)) return 'ping service unreachable — check internet, pause any adblocker, tap again'
-    if (/denied|not allowed|permission/i.test(msg)) return 'pings blocked — allow them in the browser settings, then tap again'
-    if (/permission dismissed|dismiss/i.test(msg)) return 'you dismissed the ask — tap pings again to retry'
-    return msg
-  }
-
-  async function togglePush() {
-    try {
-      if (!pushOk) { setErr('pings need a modern phone browser'); return }
-      if (pushOn) {
-        const reg = await navigator.serviceWorker.ready
-        const sub = await reg.pushManager.getSubscription()
-        if (sub) {
-          try { await sub.unsubscribe() } catch { /* already gone */ }
-          try { await api.unsub(sub.endpoint) } catch { /* server already forgot */ }
-        }
-        localStorage.removeItem('untilmanali.push')
-        setPushOn(false)
-        return
-      }
-      if (Notification.requestPermission && (await Notification.requestPermission()) !== 'granted') {
-        setErr('pings blocked — allow them in the browser settings, then tap again')
-        return
-      }
-      let sub: PushSubscription
-      try {
-        sub = await freshSub()
-      } catch {
-        // Stale browser-side subscription (e.g. made for older keys) — drop it, try once more.
-        const reg = await navigator.serviceWorker.ready
-        const old = await reg.pushManager.getSubscription().catch(() => null)
-        if (old) {
-          try { await old.unsubscribe() } catch { /* gone */ }
-          try { await api.unsub(old.endpoint) } catch { /* gone */ }
-        }
-        sub = await freshSub()
-      }
-      await api.sub({ subscription: sub.toJSON(), crew: me })
-      localStorage.setItem('untilmanali.push', '1')
-      setPushOn(true)
-      buzz('go')
-    } catch (e) { buzz('nope'); setErr(friendlyPushErr(e)) }
+  function pick(id: string) {
+    buzz('select')
+    setMe(id)
+    localStorage.setItem(ME_KEY, id)
+    setPicked(true)
   }
 
   // One friendly ask per launch: pings on, once the splash is gone.
   useEffect(() => {
     if (verse === 'home' && !ss && !pushOn && pushOk
-      && typeof Notification !== 'undefined' && Notification.permission === 'default'
+      && 'Notification' in window && Notification.permission === 'default'
       && !sessionStorage.getItem('um-ping-asked')) {
       setPingAsk(true)
     }
-  }, [verse, ss, pushOn, pushOk])
+  }, [verse, ss, pushOn])
+  const dismissPingAsk = () => { sessionStorage.setItem('um-ping-asked', '1'); setPingAsk(false) }
 
-  // Keep the server's copy of this phone pointed at whoever is picked.
-  useEffect(() => {
-    if (!pushOn || !pushOk) return
-    navigator.serviceWorker.ready.then(async (reg) => {
-      const sub = await reg.pushManager.getSubscription()
-      if (sub) api.sub({ subscription: sub.toJSON(), crew: me }).catch(() => {})
-    }).catch(() => {})
-  }, [me, pushOn])
-
-  function toggleInvolved(id: string) {
-    setForm((f) => {
-      const has = f.involved.includes(id)
-      return { ...f, involved: has ? f.involved.filter((x) => x !== id) : [...f.involved, id] }
-    })
-  }
-
-  async function submitExpense() {
-    if (!form.title.trim() || !(amt > 0)) { setErr('give it a name and a number, even a rough one'); return }
-    if (!form.involved.length) { setErr("tap who's in — even one counts"); return }
-    const shares: Record<string, number> = {}
-    if (form.split !== 'equal') {
-      for (const id of form.involved) shares[id] = Number(form.shares[id] || 0)
-      const sum = Object.values(shares).reduce((a, b) => a + b, 0)
-      const need = form.split === 'percent' ? 100 : amt
-      const unit = form.split === 'percent' ? '%' : '₹'
-      if (Math.abs(sum - need) > 0.01) { setErr(`those bits add to ${unit}${sum}, need ${unit}${need}`); return }
-    }
-    try {
-      await api.add({ title: form.title.trim(), amount: amt, paidBy: me, split: form.split, involved: form.involved, shares })
-      setForm({ title: '', amount: '', split: 'equal', involved: [], shares: {} })
-      closeSheet(); load()
-      buzz('go')
-    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
-  }
-
-  async function submitNote() {
-    if (!note.text.trim()) { setErr('write something first, even one line'); return }
-    try {
-      await api.pin({ author: me, text: note.text.trim(), color: note.color })
-      setNote({ text: '', color: WALL_COLORS[0] }); closeSheet(); load()
-      buzz('go')
-    } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
-  }
-
+  // Outcomes: settle + tear live here so every verse shares them.
+  // The busy flag eats double-taps — one tap, one write, always.
+  const busy = useRef(false)
   async function confirmSettle() {
-    if (!pendingSettle) return
+    if (!pendingSettle || busy.current) return
+    busy.current = true
     try {
       const done = pendingSettle
       await api.settle(done)
@@ -263,15 +133,18 @@ export default function App() {
       setFlash(`✓ ${first(done.from)} → ${first(done.to)} · ${inr(done.amount)} sorted`)
       setTimeout(() => setFlash(''), 4500)
     } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+    finally { busy.current = false }
   }
 
   async function confirmTear(withSettlements: boolean) {
-    if (!pendingTear) return
+    if (!pendingTear || busy.current) return
+    busy.current = true
     try {
       await api.remove(pendingTear.id, withSettlements)
       setPendingTear(null); setTearRelated([]); closeSheet(); load()
       buzz('go')
     } catch (e) { buzz('nope'); setErr(e instanceof Error ? e.message : 'did not stick, try again') }
+    finally { busy.current = false }
   }
 
   async function askTear(e: Expense) {
@@ -282,205 +155,53 @@ export default function App() {
     setPendingTear(e); openSheet('confirmTear')
   }
 
-  async function submitLog() {
-    if (!newLog.trim()) { setErr('write the news first'); return }
-    try {
-      await api.addLog(newLog.trim(), devKey || undefined)
-      setNewLog(''); load()
-      buzz('go')
-    } catch (e) {
-      const m = e instanceof Error ? e.message : ''
-      if (m.includes('dev only')) {
-        localStorage.removeItem('untilmanali.devkey'); setDevKey('')
-        setErr('that dev key did not work')
-      } else { buzz('nope'); setErr(m || 'did not stick, try again') }
-    }
-  }
-
-  function unlockDev() {
-    const k = window.prompt('dev key:')
-    if (k && k.trim()) { localStorage.setItem('untilmanali.devkey', k.trim()); setDevKey(k.trim()) }
-  }
-
-  const payLink = (to: string, amount: number) =>
-    `upi://pay?pa=${encodeURIComponent(upi[to])}&pn=${encodeURIComponent(first(to))}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent('UntilManali')}`
-
-  function openExpense() {
-    setForm((f) => ({ ...f, involved: [] }))
-    openSheet('expense')
-  }
+  const total = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses])
+  const debts = bal?.debts ?? []
+  const myNet = bal?.net?.[me] ?? 0
+  const myDebts = useMemo(() => debts.filter((d) => d.from === me || d.to === me), [debts, me])
+  const myExpenses = useMemo(() => expenses.filter((e) => e.involved.includes(me) || e.paidBy === me), [expenses, me])
 
   return (
     <>
       <div className="wall" aria-hidden />
       <div className="wrap">
         {verse === 'home' && (
-          <section className="verse" key="home">
-            <header className="crewhead">
-              <h1 className="marker-title">until <u>manali</u></h1>
-              <div className="lefthint">
-                <span className="hintline">the crew wheel. tap yourself, then go spend.</span>
-              </div>
-            </header>
-
-            <div className="wheel" role="group" aria-label="Who are you?">
-              {CREW.map((c, i) => {
-                const a = i * (360 / CREW.length) - 90
-                const live = zap.id === c.id
-                return (
-                  <span key={live ? c.id + zap.n : c.id} className="spoke" style={{ transform: `rotate(${a}deg) translate(${WHEEL_R}px) rotate(${-a}deg)` }}>
-                    <button className={'orb' + (live ? ' zap' : '')} aria-pressed={me === c.id} onClick={() => pick(c.id)}>
-                      <span className="otag">{c.tag}</span>
-                      <span className="oname">{first(c.id)}</span>
-                    </button>
-                  </span>
-                )
-              })}
-              <div key={'h' + zap.n} className={'hub' + (zap.n ? ' bump' : '')}>
-                <small>{first(me)} · {inr(total)}</small>
-                <b>{myNet === 0 ? 'even steven' : myNet > 0 ? `gets ${inr(myNet)}` : `owes ${inr(-myNet)}`}</b>
-              </div>
-            </div>
-
-            <div className="jumps">
-              <button className="jump" onClick={() => go('bills')}>
-                open my fridge <small>{myExpenses.length} with my name · {inr(total)} in pot</small>
-              </button>
-              {myDebts.length > 0 && (
-                <button className="jump" onClick={() => go('bills')}>
-                  sorting out <small>{myDebts.length} of mine to sort</small>
-                </button>
-              )}
-              <button className="jump" onClick={() => go('wall')}>
-                the go-to list <small>{wall.length} pins</small>
-              </button>
-              <button className="jump" onClick={togglePush}>
-                notification <small>{pushOn ? `on for ${first(me)}` : pushBlocked ? 'blocked in browser settings' : pushOk ? 'off — tap to switch on' : 'not on this browser'}</small>
-              </button>
-              <button className="jump" onClick={() => setSs(true)}>
-                6–7 <small>certified brainrot</small>
-              </button>
-              <button className="jump" onClick={() => openSheet('log')}>
-                what’s new <small>{log.length} notes</small>
-              </button>
-            </div>
-          </section>
+          <HomeVerse
+            me={me} total={total} myNet={myNet}
+            myBillCount={myExpenses.length} myDebtCount={myDebts.length}
+            gotoCount={wall.length} logCount={log.length}
+            pushOn={pushOn} onPick={pick} onGo={go}
+            onWhatsNew={() => openSheet('log')} onShowSplash={() => setSs(true)}
+            onTogglePush={togglePush}
+          />
         )}
 
         {verse === 'bills' && (
-          <section className="verse" key="bills">
-            <h2 className="seclabel">{mineOnly ? `${first(me)}'s fridge` : 'the whole fridge'}</h2>
-            <div className="whos-tools">
-              <button onClick={() => setMineOnly(!mineOnly)}>{mineOnly ? 'show everyone' : 'just mine'}</button>
-            </div>
-            <div className="ious">
-              {showDebts.length === 0 && <div className="empty">{mineOnly ? 'you owe nobody, nobody owes you. clean.' : 'nobody owes anybody. suspiciously peaceful.'}</div>}
-              {showDebts.map((d, i) => (
-                <div className="iou" key={i}>
-                  <span className="iou-text">{first(d.from)} owes {first(d.to)} <b>{inr(d.amount)}</b></span>
-                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '0 0 auto' }}>
-                    {upi[d.to] && d.from === me && <a className="paylink" href={payLink(d.to, d.amount)} onClick={() => { setPendingSettle(d); openSheet('confirmSettle') }}>pay</a>}
-                    <button className="stampbtn" onClick={() => { setPendingSettle(d); openSheet('confirmSettle') }}>sorted</button>
-                  </span>
-                </div>
-              ))}
-            </div>
-            <section className="feed">
-              {showExpenses.length === 0 && <div className="empty">{mineOnly ? 'nothing with your name on it. go make a memory.' : 'nothing here yet. first chai, first fuel — someone\'s buying.'}</div>}
-              {showExpenses.map((e) => (
-                <article className="stub-ticket" key={e.id}>
-                  <div className="main">
-                    <h3>{e.title}</h3>
-                    <div className="paidline">
-                      <span className="paidstamp" style={{ background: crewById(e.paidBy).color }}>{first(e.paidBy)} paid</span>
-                      {e.split === 'equal' ? `split ${e.involved.length === 6 ? 'between everyone' : 'between ' + e.involved.map(first).join(', ')}`
-                        : e.split === 'percent' ? 'by percent' : 'exact bits'} · {new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-                    </div>
-                    <div className="parts">
-                      {Object.entries(e.remaining ?? e.breakdown).filter(([, v]) => v > 0.005).map(([id, v]) => (
-                        <span key={id} className={'part' + (id === me ? ' me' : '')}>{first(id)} {inr(v)}</span>
-                      ))}
-                    </div>
-                    {(() => {
-                      const orig = Object.entries(e.breakdown).filter(([id]) => id !== e.paidBy).reduce((a, [, v]) => a + v, 0)
-                      const left = Object.values(e.remaining ?? {}).reduce((a, v) => a + v, 0)
-                      const paid = Math.round((orig - left) * 100) / 100
-                      return (<>
-                        {paid > 0.005 && <div className="paidline">₹{Math.round(paid)} already paid on this</div>}
-                        {e.rounded && <div className="paidline">incl. ₹1 round-off — the odd paise went to the last head</div>}
-                      </>)
-                    })()}
-                  </div>
-                  <div className="stub">
-                    <span className="amt">{inr(e.amount)}</span>
-                                    <button className="tear" onClick={() => askTear(e)}>tear off</button>
-                  </div>
-                </article>
-              ))}
-            </section>
-          </section>
+          <BillsVerse
+            me={me} mineOnly={mineOnly}
+            expenses={mineOnly ? myExpenses : expenses}
+            debts={mineOnly ? myDebts : debts}
+            upi={upi} onToggleMineOnly={() => setMineOnly(!mineOnly)}
+            onAskSettle={(d) => { setPendingSettle(d); openSheet('confirmSettle') }}
+            onAskTear={askTear}
+          />
         )}
 
         {verse === 'wall' && (
-          <section className="verse" key="wall">
-            <h2 className="seclabel">the go-to list · {wall.filter((m) => !m.done).length} to go</h2>
-            <section className="notes">
-              {wall.map((m) => (
-                <div className={'note' + (m.done ? ' done' : '')} key={m.id} style={{ background: m.color }}
-                  title={m.done ? 'tap to uncross' : 'tap to cross off'}
-                  onClick={async () => { await api.cross(m.id, !m.done); load() }}>
-                  <button className="x" aria-label="unpin" onClick={async (e) => { e.stopPropagation(); await api.unpin(m.id); load() }}>×</button>
-                  <span className="notetext">{m.text}</span>
-                  <small>— {first(m.author)}</small>
-                </div>
-              ))}
-              <button className="addnote" onClick={() => openSheet('memory')}>+ pin a go-to…</button>
-            </section>
-            {wall.length === 0 && <p className="hintline" style={{ marginTop: 8 }}>first one writes itself: where were you when this pot started?</p>}
-          </section>
+          <WallVerse wall={wall} onChanged={() => load()} onPin={() => openSheet('memory')} />
         )}
 
         {err && <div><span className="errtape">{err}</span></div>}
+        {flash && <div><span className="oktape">{flash}</span></div>}
       </div>
 
-      {ss && (
-        <div className="ss" role="button" aria-label="six seven — tap to stop" onClick={() => setSs(false)}>
-          <div className="ss-word"><span style={{ color: '#d8ff3e' }}>SIX</span><span style={{ color: '#ff5c1f' }}>SEVEN</span></div>
-          <div className="ss-plank"><span className="ss-puck l">6</span><span className="ss-puck r">7</span></div>
-          <div className="ss-base" />
-          <p className="hintline">both palms up. you know the move. tap to open.</p>
-        </div>
-      )}
+      {ss && <Splash onClose={() => setSs(false)} />}
 
       {pingAsk && !pushOn && (
-        <>
-          <div className="scrim" style={{ zIndex: 39 }} onClick={() => { sessionStorage.setItem('um-ping-asked', '1'); setPingAsk(false) }} />
-          <div className="pop" role="dialog" aria-label="Switch pings on">
-            <h2>hear the fridge buzz?</h2>
-            <p>switch pings on and your phone shouts when anyone sticks a bill, sorts one, or pins a go-to.</p>
-            <div className="saverow">
-              <button className="cancel" onClick={() => { sessionStorage.setItem('um-ping-asked', '1'); setPingAsk(false) }}>later</button>
-              <button className="save" onClick={async () => { await togglePush(); setPingAsk(false) }}>switch on</button>
-            </div>
-          </div>
-        </>
+        <PingAsk onLater={dismissPingAsk} onSwitchOn={async () => { await togglePush(); dismissPingAsk() }} />
       )}
 
-      {!picked && !ss && (
-        <div className="gate" role="dialog" aria-label="Who are you">
-          <div className="gatecard">
-            <h1 className="marker-title">who <u>are</u> you?</h1>
-            <p className="hintline">one tap — this phone remembers you after this.</p>
-            <div className="whos">
-              {CREW.map((c) => (
-                <button key={c.id} className="who" aria-pressed={false} onClick={() => pick(c.id)}>
-                  <span className="phiz" style={{ background: c.color }}>{c.tag}</span><br />{first(c.id)}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      {!picked && !ss && <Gate onPick={pick} />}
 
       <nav className="nav" aria-label="Spaces">
         {(['home', 'bills', 'wall'] as Verse[]).map((v) => (
@@ -491,7 +212,7 @@ export default function App() {
       </nav>
 
       {verse === 'bills' && !sheet && (
-        <button className="fab-round" aria-label="Stick a new bill" onClick={openExpense}>+</button>
+        <button className="fab-round" aria-label="Stick a new bill" onClick={() => openSheet('expense')}>+</button>
       )}
       {verse === 'wall' && !sheet && (
         <button className="fab-round" aria-label="Pin a memory" onClick={() => openSheet('memory')}>+</button>
@@ -501,120 +222,28 @@ export default function App() {
         <>
           <div className="scrim" onClick={() => closeSheet()} />
           <div className="sheet" role="dialog" aria-label="Crew dialog">
-            {sheet === 'expense' ? (
-              <>
-                <h2>new bill on the fridge</h2>
-                <label className="f">what was it<input className="t" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="fuel after chandigarh" maxLength={60} /></label>
-                <label className="f">how much<input className="t" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1200" /></label>
-                <p className="livecalc">paid by you · {first(me)} — sticking a bill someone else paid? tap their face first</p>
-                <label className="f">who was in on it</label>
-                <div className="whos-tools">
-                  <button onClick={() => setForm({ ...form, involved: CREW.map((c) => c.id) })}>all six</button>
-                  <button onClick={() => setForm({ ...form, involved: [] })}>clear</button>
-                </div>
-                <div className="whos">
-                  {CREW.map((c) => (
-                    <button key={c.id} className="who" aria-pressed={form.involved.includes(c.id)} onClick={() => toggleInvolved(c.id)}>
-                      <span className="phiz" style={{ background: c.color }}>{c.tag}</span><br />{first(c.id)}
-                    </button>
-                  ))}
-                </div>
-                <div className="seg">
-                  {(['equal', 'custom', 'percent'] as const).map((s) => (
-                    <button key={s} aria-pressed={form.split === s} onClick={() => setForm({ ...form, split: s })}>
-                      {s === 'equal' ? 'even steven' : s === 'custom' ? 'exact ₹' : 'by %'}
-                    </button>
-                  ))}
-                </div>
-                {form.split !== 'equal' && (
-                  <div className="shares">
-                    {form.involved.map((id) => (
-                      <label key={id}>{first(id)} {form.split === 'percent' ? '%' : '₹'}
-                        <input inputMode="decimal" value={form.shares[id] || ''} placeholder="0"
-                          onChange={(e) => setForm({ ...form, shares: { ...form.shares, [id]: e.target.value } })} />
-                      </label>
-                    ))}
-                  </div>
-                )}
-                {form.split === 'equal' && amt > 0 && (
-                  form.involved.length
-                    ? <p className="livecalc">≈ {inr(Math.round(amt / form.involved.length))} each for the {form.involved.length} of you in on it</p>
-                    : <p className="livecalc">tap who's in first, then watch the math</p>
-                )}
-                {form.split !== 'equal' && (
-                  <p className="livecalc">bits so far: {form.split === 'percent' ? `${sumShares}% of 100%` : `${inr(sumShares)} of ${inr(amt)}`}</p>
-                )}
-                <div className="saverow">
-                  <button className="cancel" onClick={() => closeSheet()}>nah</button>
-                  <button className="save" onClick={submitExpense}>stick it up</button>
-                </div>
-              </>
-            ) : sheet === 'memory' ? (
-              <>
-                <h2>pin it before you forget</h2>
-                <label className="f">the memory<textarea className="t" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} placeholder="rushi tried to pay with exact change again…" maxLength={280} /></label>
-                <label className="f">pick a sticky</label>
-                <div className="swatches">
-                  {WALL_COLORS.map((c) => (
-                    <button key={c} aria-pressed={note.color === c} style={{ background: c }} aria-label={c} onClick={() => setNote({ ...note, color: c })} />
-                  ))}
-                </div>
-                <div className="saverow">
-                  <button className="cancel" onClick={() => closeSheet()}>nah</button>
-                  <button className="save" onClick={submitNote}>pin it — {first(me)}</button>
-                </div>
-              </>
-            ) : sheet === 'log' ? (
-              <>
-                <h2>what’s new</h2>
-                <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
-                  {log.length === 0 && <div className="empty">nothing yet. history starts here.</div>}
-                  {log.map((e) => (
-                    <div className="logrow" key={e.id}>{e.text}<small>{new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</small></div>
-                  ))}
-                </div>
-                {devKey ? (
-                  <>
-                    <label className="f">add a line<textarea className="t" value={newLog} onChange={(e) => setNewLog(e.target.value)} placeholder="pings now buzz for crossed-off go-tos…" maxLength={280} /></label>
-                    <div className="saverow">
-                      <button className="cancel" onClick={() => closeSheet()}>close</button>
-                      <button className="save" onClick={submitLog}>post it</button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="whos-tools">
-                      <button onClick={unlockDev}>dev? add news</button>
-                    </div>
-                    <div className="saverow">
-                      <button className="cancel" onClick={() => closeSheet()}>close</button>
-                    </div>
-                  </>
-                )}
-              </>
-            ) : sheet === 'confirmTear' ? (
-              <>
-                <h2>tear it off?</h2>
-                <p className="hintline">{pendingTear ? `“${pendingTear.title}” · ${inr(pendingTear.amount)} — gone for everyone, no undo.` : ''}</p>
-                {tearRelated.length > 0 && (
-                  <p className="hintline">{tearRelated.length} payment{tearRelated.length === 1 ? '' : 's'} point{tearRelated.length === 1 ? 's' : ''} at this bill ({tearRelated.map((s) => `${first(s.from)} ₹${Math.round(s.amount)}`).join(', ')}) — take {tearRelated.length === 1 ? 'it' : 'them'} along, or leave {tearRelated.length === 1 ? 'it' : 'them'} standing.</p>
-                )}
-                <div className="saverow">
-                  <button className="cancel" onClick={() => { setPendingTear(null); setTearRelated([]); closeSheet() }}>keep it</button>
-                  <button className="cancel" onClick={() => confirmTear(false)}>bill only</button>
-                  {tearRelated.length > 0 && <button className="save" onClick={() => confirmTear(true)}>bill + ₹{Math.round(tearRelated.reduce((s, x) => s + x.amount, 0))}</button>}
-                  {tearRelated.length === 0 && <button className="save" onClick={() => confirmTear(false)}>tear it</button>}
-                </div>
-              </>
-            ) : (
-              <>
-                <h2>mark sorted?</h2>
-                <p className="hintline">{pendingSettle ? `${first(pendingSettle.from)} → ${first(pendingSettle.to)} · ${inr(pendingSettle.amount)}` : ''} — tap “yes, paid” only if the money really moved.</p>
-                <div className="saverow">
-                  <button className="cancel" onClick={() => { setPendingSettle(null); closeSheet() }}>cancel</button>
-                  <button className="save" onClick={confirmSettle}>yes, paid</button>
-                </div>
-              </>
+            {sheet === 'expense' && (
+              <ExpenseSheet me={me} onClose={closeSheet} onSaved={() => load()} onErr={setErr} />
+            )}
+            {sheet === 'memory' && (
+              <MemorySheet me={me} onClose={closeSheet} onSaved={() => load()} onErr={setErr} />
+            )}
+            {sheet === 'log' && (
+              <LogSheet entries={log} onClose={closeSheet} onPosted={() => load()} onErr={setErr} />
+            )}
+            {sheet === 'confirmTear' && (
+              <ConfirmTearSheet
+                pending={pendingTear} related={tearRelated}
+                onKeep={() => { setPendingTear(null); setTearRelated([]); closeSheet() }}
+                onTearBill={() => confirmTear(false)} onTearAll={() => confirmTear(true)}
+              />
+            )}
+            {sheet === 'confirmSettle' && (
+              <ConfirmSettleSheet
+                pending={pendingSettle}
+                onCancel={() => { setPendingSettle(null); closeSheet() }}
+                onConfirm={confirmSettle}
+              />
             )}
           </div>
         </>

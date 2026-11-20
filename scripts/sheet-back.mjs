@@ -2,7 +2,8 @@
 // so the back button closes the sheet first instead of leaving the verse.
 // Usage: launch Brave headless with remote debugging, then run:
 //   brave --headless --remote-debugging-port=9333 --user-data-dir=/tmp/um-sheet &
-//   node scripts/sheet-back.mjs   (expects live https://manali.129-225-78-203.nip.io)
+//   node scripts/sheet-back.mjs            (live: https://manali.129-225-78-203.nip.io)
+//   BASE_URL=http://127.0.0.1:8791 node scripts/sheet-back.mjs   (a throwaway copy)
 // Read-only: opens a sheet and backs out without saving. Exits nonzero on fail.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const log = []
@@ -39,7 +40,7 @@ ws.onmessage = (ev) => {
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej })
 await send('Page.enable')
 await send('Runtime.enable')
-await send('Page.navigate', { url: 'https://manali.129-225-78-203.nip.io/fridge' })
+await send('Page.navigate', { url: (process.env.BASE_URL || 'https://manali.129-225-78-203.nip.io') + '/fridge' })
 await sleep(6000)
 await clickFirst('.ss') // fresh-launch splash: tap to open
 await sleep(800)

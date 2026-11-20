@@ -13,3 +13,7 @@ export const crewById = (id: string) =>
   CREW.find((c) => c.id === id) ?? CREW[0]
 
 export const ME_KEY = 'untilmanali.me'
+
+// Sticky-note palette. Server mirrors it in server.js for validation;
+// drift is harmless there (unknown colors fall back to the first).
+export const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']

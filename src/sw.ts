@@ -34,8 +34,8 @@ sw.addEventListener('push', (event: {
   event.waitUntil(
     sw.registration.showNotification(data.title || 'UntilManali', {
       body: data.body || '',
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
+      icon: '/fist-192.png',
+      badge: '/fist-192.png',
       data: { url: data.url || '/' },
     })
   )

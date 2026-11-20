@@ -1,9 +1,11 @@
+export type Split = 'equal' | 'custom' | 'percent'
+
 export type Expense = {
   id: number
   title: string
   amount: number
   paidBy: string
-  split: 'equal' | 'custom' | 'percent'
+  split: Split
   shares: Record<string, number>
   involved: string[]
   breakdown: Record<string, number>
@@ -52,7 +54,7 @@ export function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
 async function req(path: string, opts?: RequestInit): Promise<unknown> {
   const res = await fetch(path, {
     ...opts,
-    headers: { 'content-type': 'application/json', ...(opts?.headers || {}) },
+    headers: opts?.body ? { 'content-type': 'application/json', ...(opts?.headers || {}) } : opts?.headers,
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -61,7 +63,7 @@ async function req(path: string, opts?: RequestInit): Promise<unknown> {
 export const api = {
   list: () => req('/api/v1/expenses') as Promise<{ expenses: Expense[] }>,
   balances: () => req('/api/v1/balances') as Promise<Balances>,
-  add: (b: { title: string; amount: number; paidBy: string; split: string; involved: string[]; shares?: Record<string, number> }) =>
+  add: (b: { title: string; amount: number; paidBy: string; split: Split; involved: string[]; shares?: Record<string, number> }) =>
     req('/api/v1/expenses', { method: 'POST', body: JSON.stringify(b) }),
   remove: (id: number, withSettlements = false) =>
     req(`/api/v1/expenses/${id}${withSettlements ? '?withSettlements=1' : ''}`, { method: 'DELETE' }),
@@ -83,6 +85,4 @@ export const api = {
   addLog: (text: string, key?: string) =>
     req('/api/v1/changelog', { method: 'POST', body: JSON.stringify({ text }), headers: key ? { 'x-dev-key': key } : {} }),
   upi: () => req('/api/v1/upi') as Promise<{ handles: Record<string, string> }>,
-  setUpi: (crew: string, vpa: string) =>
-    req('/api/v1/upi', { method: 'POST', body: JSON.stringify({ crew, vpa }) }),
 }

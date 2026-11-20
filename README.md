@@ -32,5 +32,9 @@ node -e "import('web-push').then(w => console.log(JSON.stringify(w.generateVAPID
 Set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and optional `VAPID_SUBJECT`, a `mailto:`) in the server environment. Without keys the app runs fine, pings just stay off — the **pings** jump says so.
 
 ## Scale
-- Web lives in `src/`, API in `server.js` under `Module:` markers.
-- Module 2 = new table + `/api/v1/<name>` + new tile in `App.tsx`. No rewrite.
+- Web lives in `src/` (one component per verse + sheet in `components/`, shared bits in `hooks/` + `lib/`), API in `server.js` under `Module:` markers.
+- Module 2 = new table + `/api/v1/<name>` + a new verse component + nav entry. No rewrite.
+
+## Checks
+- `pnpm typecheck`, `pnpm build`
+- `pnpm test:sheet` — headless back-button regression (needs a CDP browser on :9333; `BASE_URL=` points it at a throwaway copy, never live)

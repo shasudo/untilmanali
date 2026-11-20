@@ -1,3 +1,8 @@
+// UntilManali server — private board for 6. One file, sectioned top to bottom:
+// config → crew data → database → money math → pings → routes → static → boot.
+// Money math (breakdown/allocate/balances) is pure over DB rows; allocate()
+// itself never writes — torn-ness, related lists and cleared responses all
+// derive from that one pass, so a payment can never clear two bills.
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { DatabaseSync } from 'node:sqlite'
@@ -6,65 +11,20 @@ import { createHash } from 'node:crypto'
 import { join, extname } from 'node:path'
 import { setVapidDetails, sendNotification } from 'web-push'
 
+// --- Config ---
 const PORT = Number(process.env.PORT || 8787)
 const VERSION = JSON.parse(readFileSync('package.json', 'utf8')).version
 
-// --- Push (Web Push/VAPID). Absent keys = pings off, everything else works.
-let PUSH_ON = false
-if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-  setVapidDetails(
-    process.env.VAPID_SUBJECT || 'mailto:untilmanali@localhost',
-    process.env.VAPID_PUBLIC_KEY,
-    process.env.VAPID_PRIVATE_KEY
-  )
-  PUSH_ON = true
-}
-
-async function notifyExcept(actor, { title, body }) {
-  if (!PUSH_ON) return
-  const subs = db.prepare('SELECT endpoint, keys, crew FROM subscriptions').all()
-  const payload = JSON.stringify({ title, body, url: '/' })
-  await Promise.all(subs.filter((s) => s.crew !== actor).map(async (s) => {
-    try {
-      await sendNotification({ endpoint: s.endpoint, keys: JSON.parse(s.keys) }, payload)
-    } catch (e) {
-      if (e?.statusCode === 404 || e?.statusCode === 410) {
-        db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').run(s.endpoint)
-      }
-    }
-  }))
-}
-const firstName = (id) => ({ shathwik: 'Shathwik', koushik: 'Koushik', deepika: 'Deepika', srinivas: 'Srinivas', rushi: 'Rushi', sonika: 'Sonika' }[id] || id)
-
-// --- Daily digest: one automatic nudge, only if something is pending.
-// Clearly from the app, never from a person. Time is UTC "HH:MM".
-const DIGEST_AT_UTC = process.env.DIGEST_AT_UTC || '15:30'
-function msUntilDigest() {
-  const [hh, mm] = DIGEST_AT_UTC.split(':').map(Number)
-  const now = new Date()
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hh || 0, mm || 0))
-  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1)
-  return next.getTime() - now.getTime()
-}
-async function sendDigest() {
-  try {
-    const { debts } = balances()
-    const subs = PUSH_ON ? db.prepare('SELECT endpoint, keys FROM subscriptions').all() : []
-    if (debts.length && subs.length) {
-      const shown = debts.slice(0, 2).map((d) => `${firstName(d.from)} owes ${firstName(d.to)} ₹${Math.round(d.amount)}`).join(' · ')
-      const more = debts.length > 2 ? ` · +${debts.length - 2} more` : ''
-      const payload = JSON.stringify({ title: `automatic nudge · ${debts.length} to sort`, body: `${shown}${more} — nobody poked you, the app did`, url: '/' })
-      await Promise.all(subs.map(async (s) => {
-        try { await sendNotification({ endpoint: s.endpoint, keys: JSON.parse(s.keys) }, payload) }
-        catch (e) { if (e?.statusCode === 404 || e?.statusCode === 410) db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').run(s.endpoint) }
-      }))
-    }
-  } catch { /* digest never breaks the app */ }
-  scheduleDigest()
-}
-function scheduleDigest() { setTimeout(() => { sendDigest().catch(() => scheduleDigest()) }, msUntilDigest()) }
+// --- Crew (single source; client mirrors it in src/crew.ts) ---
 const CREW = ['shathwik', 'koushik', 'deepika', 'srinivas', 'rushi', 'sonika']
+const NAMES = {
+  shathwik: 'Shathwik', koushik: 'Koushik', deepika: 'Deepika',
+  srinivas: 'Srinivas', rushi: 'Rushi', sonika: 'Sonika',
+}
+const firstName = (id) => NAMES[id] || id
+const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
 
+// --- Database ---
 mkdirSync('data', { recursive: true })
 const db = new DatabaseSync(join('data', 'crew.db'))
 db.exec('PRAGMA journal_mode = WAL')
@@ -103,19 +63,22 @@ db.exec(`
     color TEXT NOT NULL DEFAULT '#d8ff3e',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS changelog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `)
-try { db.exec(`ALTER TABLE expenses ADD COLUMN involved TEXT NOT NULL DEFAULT '["shathwik","koushik","deepika","srinivas","rushi","sonika"]'`) } catch { /* already migrated */ }
-try { db.exec(`ALTER TABLE memories ADD COLUMN done INTEGER NOT NULL DEFAULT 0`) } catch { /* already migrated */ }
+try { db.exec(`ALTER TABLE expenses ADD COLUMN involved TEXT NOT NULL DEFAULT '${JSON.stringify(CREW)}'`) } catch { /* already migrated */ }
+try { db.exec('ALTER TABLE memories ADD COLUMN done INTEGER NOT NULL DEFAULT 0') } catch { /* already migrated */ }
 
-const ALLC = ['shathwik', 'koushik', 'deepika', 'srinivas', 'rushi', 'sonika']
-const ALLC_JSON = JSON.stringify(ALLC)
-
+// --- Money math (pure; no writes in here) ---
 function involvedList(e) {
   try {
-    const v = JSON.parse(e.involved || ALLC_JSON)
-    const ok = v.filter((id) => ALLC.includes(id))
-    return ok.length ? ok : [...ALLC]
-  } catch { return [...ALLC] }
+    const v = JSON.parse(e.involved || '[]')
+    const ok = v.filter((id) => CREW.includes(id))
+    return ok.length ? ok : [...CREW]
+  } catch { return [...CREW] }
 }
 
 // Per-person share of one expense row. Handles equal/custom/percent + penny fix.
@@ -157,10 +120,133 @@ function breakdown(e) {
   return out
 }
 
+// Allocation: oldest-first, exact from→to. PURE — no writes. Torn-ness,
+// related lists and cleared responses all derive from this one pass, so a
+// payment can never clear two bills and nothing is ever deleted implicitly.
+function allocate() {
+  const expenses = db.prepare('SELECT * FROM expenses ORDER BY id ASC').all()
+  const settles = db.prepare('SELECT * FROM settlements ORDER BY id ASC').all()
+  const rem = new Map()
+  for (const e of expenses) {
+    const parts = breakdown(e)
+    const m = {}
+    for (const id of involvedList(e)) {
+      if (id !== e.paid_by && (parts[id] || 0) > 0) m[id] = parts[id]
+    }
+    rem.set(e.id, m)
+  }
+  const takes = new Map()
+  for (const s of settles) {
+    let amt = s.amount
+    const tk = {}
+    for (const e of expenses) {
+      if (amt <= 0.005) break
+      if (e.paid_by !== s.to_id) continue
+      const m = rem.get(e.id)
+      const o = m[s.from_id] || 0
+      if (o > 0.005) {
+        const take = Math.min(o, amt)
+        m[s.from_id] = Math.round((o - take) * 100) / 100
+        amt = Math.round((amt - take) * 100) / 100
+        tk[e.id] = Math.round(((tk[e.id] || 0) + take) * 100) / 100
+      }
+    }
+    takes.set(s.id, tk)
+  }
+  const torn = new Set(expenses.filter((e) => Object.values(rem.get(e.id)).every((v) => v < 0.005)).map((e) => e.id))
+  return { expenses, settles, rem, takes, torn }
+}
+
+function balances() {
+  const expenses = db.prepare('SELECT * FROM expenses').all()
+  const settlements = db.prepare('SELECT * FROM settlements').all()
+  const totals = Object.fromEntries(CREW.map((id) => [id, 0]))
+  const owed = Object.fromEntries(CREW.map((id) => [id, 0]))
+  for (const e of expenses) {
+    totals[e.paid_by] = Math.round((totals[e.paid_by] + e.amount) * 100) / 100
+    const parts = breakdown(e)
+    for (const id of CREW) owed[id] = Math.round((owed[id] + (parts[id] || 0)) * 100) / 100
+  }
+  const net = Object.fromEntries(CREW.map((id) => [id, Math.round((totals[id] - owed[id]) * 100) / 100]))
+  // settlements move net: receiver net decreases, payer net increases
+  for (const s of settlements) {
+    net[s.from_id] = Math.round((net[s.from_id] + s.amount) * 100) / 100
+    net[s.to_id] = Math.round((net[s.to_id] - s.amount) * 100) / 100
+  }
+  // greedy settle: debtors pay creditors
+  const debtors = CREW.filter((id) => net[id] < -0.005).map((id) => ({ id, amt: -net[id] })).sort((a, b) => b.amt - a.amt)
+  const creditors = CREW.filter((id) => net[id] > 0.005).map((id) => ({ id, amt: net[id] })).sort((a, b) => b.amt - a.amt)
+  const debts = []
+  let i = 0, j = 0
+  while (i < debtors.length && j < creditors.length) {
+    const pay = Math.min(debtors[i].amt, creditors[j].amt)
+    debts.push({ from: debtors[i].id, to: creditors[j].id, amount: Math.round(pay * 100) / 100 })
+    debtors[i].amt -= pay; creditors[j].amt -= pay
+    if (debtors[i].amt < 0.005) i++
+    if (creditors[j].amt < 0.005) j++
+  }
+  return { totals, net, debts }
+}
+
+// --- Pings (Web Push/VAPID). Absent keys = pings off, everything else works. ---
+let PUSH_ON = false
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  setVapidDetails(
+    process.env.VAPID_SUBJECT || 'mailto:untilmanali@localhost',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  )
+  PUSH_ON = true
+}
+
+function pruneSub(endpoint) {
+  db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').run(endpoint)
+}
+
+async function sendTo(subs, payload) {
+  await Promise.all(subs.map(async (s) => {
+    try {
+      await sendNotification({ endpoint: s.endpoint, keys: JSON.parse(s.keys) }, payload)
+    } catch (e) {
+      if (e?.statusCode === 404 || e?.statusCode === 410) pruneSub(s.endpoint)
+    }
+  }))
+}
+
+async function notifyExcept(actor, { title, body }) {
+  if (!PUSH_ON) return
+  const subs = db.prepare('SELECT endpoint, keys, crew FROM subscriptions').all()
+  await sendTo(subs.filter((s) => s.crew !== actor), JSON.stringify({ title, body, url: '/' }))
+}
+
+// --- Daily digest: one automatic nudge, only if something is pending.
+// Clearly from the app, never from a person. Time is UTC "HH:MM".
+const DIGEST_AT_UTC = process.env.DIGEST_AT_UTC || '15:30'
+function msUntilDigest() {
+  const [hh, mm] = DIGEST_AT_UTC.split(':').map(Number)
+  const now = new Date()
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hh || 0, mm || 0))
+  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1)
+  return next.getTime() - now.getTime()
+}
+async function sendDigest() {
+  try {
+    const { debts } = balances()
+    if (debts.length && PUSH_ON) {
+      const subs = db.prepare('SELECT endpoint, keys FROM subscriptions').all()
+      const shown = debts.slice(0, 2).map((d) => `${firstName(d.from)} owes ${firstName(d.to)} ₹${Math.round(d.amount)}`).join(' · ')
+      const more = debts.length > 2 ? ` · +${debts.length - 2} more` : ''
+      await sendTo(subs, JSON.stringify({ title: `automatic nudge · ${debts.length} to sort`, body: `${shown}${more} — nobody poked you, the app did`, url: '/' }))
+    }
+  } catch { /* digest never breaks the app */ }
+  scheduleDigest()
+}
+function scheduleDigest() { setTimeout(() => { sendDigest().catch(() => scheduleDigest()) }, msUntilDigest()) }
+
 const app = new Hono()
 
 // Open crew app: no auth. Anyone who can reach the address is in.
-// --- Module: expenses (extract to modules/expenses/routes.ts when adding module 2) ---
+// --- Module: expenses ---
 app.get('/api/v1/expenses', (c) => {
   const { rem, torn } = allocate()
   const rows = db.prepare('SELECT * FROM expenses ORDER BY id DESC LIMIT 300').all()
@@ -195,7 +281,7 @@ app.post('/api/v1/expenses', async (c) => {
     shares = Object.fromEntries(vals.map(([k, v]) => [k, Math.round(Number(v) * 100) / 100]))
   }
   const r = db.prepare(
-    "INSERT INTO expenses (title, amount, paid_by, split, shares, involved) VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
+    'INSERT INTO expenses (title, amount, paid_by, split, shares, involved) VALUES (?, ?, ?, ?, ?, ?) RETURNING id'
   ).get(title, amount, paidBy, split, JSON.stringify(shares), JSON.stringify(involved))
   notifyExcept(paidBy, { title: `${firstName(paidBy)} stuck ${title} · ₹${amount}`, body: 'tap to see the fridge' }).catch(() => {})
   return c.json({ id: r.id })
@@ -222,37 +308,6 @@ app.delete('/api/v1/expenses/:id', async (c) => {
   if (row) notifyExcept('', { title: `torn off: ${row.title} · ₹${row.amount}`, body: 'tap to see the fridge' }).catch(() => {})
   return c.json({ ok: true })
 })
-
-function balances() {
-  const expenses = db.prepare('SELECT * FROM expenses').all()
-  const settlements = db.prepare('SELECT * FROM settlements').all()
-  const totals = Object.fromEntries(CREW.map((id) => [id, 0]))
-  const owed = Object.fromEntries(CREW.map((id) => [id, 0]))
-  for (const e of expenses) {
-    totals[e.paid_by] = Math.round((totals[e.paid_by] + e.amount) * 100) / 100
-    const parts = breakdown(e)
-    for (const id of CREW) owed[id] = Math.round((owed[id] + (parts[id] || 0)) * 100) / 100
-  }
-  const net = Object.fromEntries(CREW.map((id) => [id, Math.round((totals[id] - owed[id]) * 100) / 100]))
-  // settlements move net: receiver net decreases, payer net increases
-  for (const s of settlements) {
-    net[s.from_id] = Math.round((net[s.from_id] + s.amount) * 100) / 100
-    net[s.to_id] = Math.round((net[s.to_id] - s.amount) * 100) / 100
-  }
-  // greedy settle: debtors pay creditors
-  const debtors = CREW.filter((id) => net[id] < -0.005).map((id) => ({ id, amt: -net[id] })).sort((a, b) => b.amt - a.amt)
-  const creditors = CREW.filter((id) => net[id] > 0.005).map((id) => ({ id, amt: net[id] })).sort((a, b) => b.amt - a.amt)
-  const debts = []
-  let i = 0, j = 0
-  while (i < debtors.length && j < creditors.length) {
-    const pay = Math.min(debtors[i].amt, creditors[j].amt)
-    debts.push({ from: debtors[i].id, to: creditors[j].id, amount: Math.round(pay * 100) / 100 })
-    debtors[i].amt -= pay; creditors[j].amt -= pay
-    if (debtors[i].amt < 0.005) i++
-    if (creditors[j].amt < 0.005) j++
-  }
-  return { totals, net, debts }
-}
 
 app.get('/api/v1/balances', (c) => c.json(balances()))
 
@@ -294,45 +349,7 @@ app.post('/api/v1/upi', async (c) => {
   return c.json({ ok: true })
 })
 
-// Allocation: oldest-first, exact from→to. PURE — no writes. Torn-ness,
-// related lists and cleared responses all derive from this one pass, so a
-// payment can never clear two bills and nothing is ever deleted implicitly.
-function allocate() {
-  const expenses = db.prepare('SELECT * FROM expenses ORDER BY id ASC').all()
-  const settles = db.prepare('SELECT * FROM settlements ORDER BY id ASC').all()
-  const rem = new Map()
-  for (const e of expenses) {
-    const parts = breakdown(e)
-    const m = {}
-    for (const id of involvedList(e)) {
-      if (id !== e.paid_by && (parts[id] || 0) > 0) m[id] = parts[id]
-    }
-    rem.set(e.id, m)
-  }
-  const takes = new Map()
-  for (const s of settles) {
-    let amt = s.amount
-    const tk = {}
-    for (const e of expenses) {
-      if (amt <= 0.005) break
-      if (e.paid_by !== s.to_id) continue
-      const m = rem.get(e.id)
-      const o = m[s.from_id] || 0
-      if (o > 0.005) {
-        const take = Math.min(o, amt)
-        m[s.from_id] = Math.round((o - take) * 100) / 100
-        amt = Math.round((amt - take) * 100) / 100
-        tk[e.id] = Math.round(((tk[e.id] || 0) + take) * 100) / 100
-      }
-    }
-    takes.set(s.id, tk)
-  }
-  const torn = new Set(expenses.filter((e) => Object.values(rem.get(e.id)).every((v) => v < 0.005)).map((e) => e.id))
-  return { expenses, settles, rem, takes, torn }
-}
-
 // --- Module: push (Web Push subscriptions) ---
-
 app.get('/api/v1/push/key', (c) => {
   if (!PUSH_ON) return c.text('pings off', 404)
   return c.json({ key: process.env.VAPID_PUBLIC_KEY })
@@ -358,8 +375,7 @@ app.post('/api/v1/push/unsubscribe', async (c) => {
   return c.json({ ok: true })
 })
 
-// --- Module: wall (sticky-note memories for the 6) ---
-const WALL_COLORS = ['#d8ff3e', '#ff5c1f', '#7ef0c1', '#ffd23e', '#ff7ab8', '#8ec5ff']
+// --- Module: wall (sticky-note go-tos for the 6) ---
 app.get('/api/v1/memories', (c) => {
   const rows = db.prepare('SELECT * FROM memories ORDER BY done ASC, id DESC LIMIT 100').all()
   return c.json({ memories: rows.map((r) => ({ id: r.id, author: r.author, text: r.text, color: r.color, done: r.done ? 1 : 0, createdAt: r.created_at + 'Z' })) })
@@ -369,9 +385,8 @@ app.post('/api/v1/memories', async (c) => {
   const b = await c.req.json()
   const author = String(b.author || '')
   const text = String(b.text || '').trim()
-  if (!text || text.length > 280) return c.text('bad memory', 400)
   const color = WALL_COLORS.includes(b.color) ? b.color : WALL_COLORS[0]
-  if (!CREW.includes(author) || !text) return c.text('bad memory', 400)
+  if (!CREW.includes(author) || !text || text.length > 280) return c.text('bad memory', 400)
   const r = db.prepare('INSERT INTO memories (author, text, color) VALUES (?, ?, ?) RETURNING id').get(author, text, color)
   notifyExcept(author, { title: `${firstName(author)} pinned a go-to`, body: text.slice(0, 90) }).catch(() => {})
   return c.json({ id: r.id })
@@ -397,12 +412,7 @@ app.delete('/api/v1/memories/:id', (c) => {
   return c.json({ ok: true })
 })
 
-// --- Module: changelog (what's new, crew-writable) ---
-db.exec(`CREATE TABLE IF NOT EXISTS changelog (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  text TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`)
+// --- Module: changelog (what's new, dev-writable) ---
 if (!db.prepare('SELECT COUNT(*) AS c FROM changelog').get().c) {
   const ins = db.prepare('INSERT INTO changelog (text) VALUES (?)')
   for (const t of [
@@ -465,6 +475,7 @@ app.get('/*', (c) => {
   return c.body(f.body)
 })
 
+// --- Boot ---
 scheduleDigest()
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`UntilManali on http://localhost:${PORT}`)

@@ -44,7 +44,6 @@ body { background: var(--ink); color: var(--paper); font-family: var(--font); -w
 .phiz { width: 32px; height: 32px; border-radius: 50% 46% 52% 48%;
   display: grid; place-items: center; font-family: var(--mono); font-weight: 700; font-size: 12px;
   color: #14120d; border: 2px solid var(--ink); flex: 0 0 auto; }
-.addnote { display: inline-block; width: 100%; margin-bottom: 12px; }
 .logrow { background: var(--paper2); color: var(--ink); border: 2px solid var(--ink);
   border-radius: 4px 12px 4px 12px; padding: 10px 12px; font-family: var(--mono);
   font-size: 12.5px; box-shadow: 2px 2px 0 #000; overflow-wrap: anywhere; }
@@ -107,18 +106,18 @@ body { background: var(--ink); color: var(--paper); font-family: var(--font); -w
   display: inline-block; width: 100%; break-inside: avoid; margin: 0 0 12px;
   min-height: 110px; padding: 12px 10px; color: #14120d; border: 1px solid rgba(0,0,0,.35);
   box-shadow: 3px 4px 0 rgba(0,0,0,.5); font-family: var(--hand); font-size: 15px; line-height: 1.3;
-  position: relative; overflow-wrap: anywhere;
+  position: relative; overflow-wrap: anywhere; cursor: pointer;
 }
 .note:nth-child(3n+1) { transform: rotate(-2deg); }
 .note:nth-child(3n+2) { transform: rotate(1.4deg); }
 .note:nth-child(3n) { transform: rotate(-.8deg); }
-.note { cursor: pointer; }
 .note.done { opacity: .55; }
 .note.done .notetext { text-decoration: line-through; text-decoration-thickness: 2px; }
 .note small { display: block; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; opacity: .65; }
 .note .x { position: absolute; top: 2px; right: 8px; background: none; border: 0; cursor: pointer;
   font-family: var(--mono); font-size: 13px; color: rgba(0,0,0,.45); }
 .addnote {
+  display: inline-block; width: 100%; margin-bottom: 12px;
   cursor: pointer; border: 2px dashed var(--line); background: none; color: var(--mut);
   font-family: var(--hand); font-size: 16px; min-height: 110px; border-radius: 4px;
 }
@@ -147,7 +146,7 @@ body { background: var(--ink); color: var(--paper); font-family: var(--font); -w
   transition: background .12s ease, scale .1s ease; }
 .orb.zap { animation: zap .55s cubic-bezier(.3,1.3,.4,1); }
 @keyframes zap { 0% { rotate: 0deg; scale: 1; } 40% { rotate: 180deg; scale: 1.22; } 100% { rotate: 360deg; scale: 1; } }
-.orb:hover { scale: 1.1; }
+@media (hover: hover) { .orb:hover { scale: 1.1; } }
 .orb:active { scale: .88; }
 .orb .otag { font-family: var(--mono); font-weight: 800; font-size: 17px; line-height: 1; color: #14120d; }
 .orb .oname { font-size: 11px; font-weight: 800; margin-top: 2px; }
@@ -243,10 +242,10 @@ textarea.t { font-family: var(--hand); font-size: 17px; min-height: 90px; resize
 .who {
   cursor: pointer; border: 2px solid var(--ink); background: #fffdf6; border-radius: 12px 4px 12px 4px;
   padding: 8px 6px; font-size: 13px; font-weight: 800; box-shadow: 2px 2px 0 #000;
+  transition: transform .09s ease, opacity .12s ease, background .12s ease, box-shadow .12s ease;
 }
 .who .phiz { width: 28px; height: 28px; font-size: 11px; margin: 0 auto 2px; }
 .who[aria-pressed="false"] { opacity: .4; box-shadow: none; transform: rotate(0deg) scale(.96); }
-.who { transition: transform .09s ease, opacity .12s ease, background .12s ease, box-shadow .12s ease; }
 .who:active { transform: scale(.9); }
 .who[aria-pressed="true"] { background: #fffdf6; }
 .whos-tools { display: flex; gap: 14px; margin: -4px 0 10px; }

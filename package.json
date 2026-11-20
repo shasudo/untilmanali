@@ -7,8 +7,8 @@
   "scripts": {
     "dev:web": "vite --port 5173",
     "dev:api": "node server.js",
-    "dev": "CREW_CODE=manali6 PORT=8787 node server.js",
     "build": "vite build",
+    "test:sheet": "node scripts/sheet-back.mjs",
     "start": "PORT=8787 node server.js",
     "typecheck": "tsc --noEmit"
   },
